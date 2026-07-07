@@ -127,6 +127,34 @@ async def panel_router(callback: CallbackQuery, bot: Bot):
         )
         await callback.message.edit_text(text, reply_markup=keyboards.back_only_menu())
 
+    elif section == "economy":
+        if len(parts) == 2:
+            await callback.message.edit_text(
+                "💰 <b>Экономика и мини-игры</b>", reply_markup=await keyboards.economy_menu()
+            )
+        elif parts[2] == "toggle":
+            key = parts[3]
+            current = await db.get_bool_setting(key)
+            await db.set_setting(key, "0" if current else "1")
+            await db.add_log("settings_change", callback.from_user.id, callback.from_user.id, f"{key} -> {not current}")
+            await callback.message.edit_text(
+                "💰 <b>Экономика и мини-игры</b>", reply_markup=await keyboards.economy_menu()
+            )
+            await callback.answer("Обновлено ✅")
+        elif parts[2] == "info":
+            await callback.answer(
+                "Изменить суммы можно прямым редактированием таблицы settings в БД "
+                "(message_reward, daily_bonus_amount, levelup_bonus_amount, dice_min_bet, dice_max_bet).",
+                show_alert=True,
+            )
+
+    elif section == "achievements":
+        all_ach = await db.get_all_achievements()
+        lines = ["🏆 <b>Достижения чата</b>", ""]
+        for ach in all_ach:
+            lines.append(f"• {ach['title']} — {ach['description']}")
+        await callback.message.edit_text("\n".join(lines), reply_markup=keyboards.back_only_menu())
+
     elif section == "settings":
         if len(parts) == 2:
             await callback.message.edit_text("⚙️ <b>Настройки</b>", reply_markup=await keyboards.settings_menu())

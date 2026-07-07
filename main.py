@@ -422,11 +422,16 @@ async def cmd_rank(message: Message):
         await message.reply("Данных пока нет — напишите пару сообщений в чат.")
         return
     rep = await db.get_reputation(message.from_user.id)
-    await message.reply(
-        f"📈 <b>{message.from_user.full_name}</b>\n"
-        f"Уровень: {m['level']}\nXP: {m['xp']}\nСообщений: {m['message_count']}\n"
-        f"Варнов: {m['warns_count']}\nРепутация: {rep}"
-    )
+    lines = [
+        f"📈 <b>{message.from_user.full_name}</b>",
+        f"Уровень: {m['level']}\nXP: {m['xp']}\nСообщений: {m['message_count']}",
+        f"Варнов: {m['warns_count']}\nРепутация: {rep}",
+    ]
+    if await db.get_bool_setting("economy_enabled"):
+        balance = await db.get_balance(message.from_user.id)
+        currency = await db.get_setting("currency_name")
+        lines.append(f"Баланс: {balance} {currency}")
+    await message.reply("\n".join(lines))
 
 
 @router.message(Command("promote"))
@@ -512,12 +517,181 @@ async def cmd_top(message: Message):
             name = r["username"] or r["full_name"] or r["user_id"]
             lines.append(f"{i}. @{name} — {r['score']}")
 
+    if await db.get_bool_setting("economy_enabled"):
+        balance_rows = await db.top_balance(10)
+        if balance_rows:
+            currency = await db.get_setting("currency_name")
+            lines += [f"", f"💰 <b>Топ по балансу ({currency})</b>", ""]
+            for i, r in enumerate(balance_rows, 1):
+                name = r["username"] or r["full_name"] or r["user_id"]
+                lines.append(f"{i}. @{name} — {r['balance']}")
+
     await message.reply("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Экономика, достижения, мини-игры
+# ---------------------------------------------------------------------------
+
+@router.message(Command("balance"))
+async def cmd_balance(message: Message):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    if not await db.get_bool_setting("economy_enabled"):
+        await message.reply("Экономика в этом чате отключена.")
+        return
+    await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    starting = int(await db.get_setting("starting_balance"))
+    await db.ensure_wallet(message.from_user.id, starting)
+    balance = await db.get_balance(message.from_user.id)
+    currency = await db.get_setting("currency_name")
+    await message.reply(f"💰 Ваш баланс: <b>{balance} {currency}</b>")
+
+
+@router.message(Command("daily"))
+async def cmd_daily(message: Message):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    if not await db.get_bool_setting("economy_enabled"):
+        await message.reply("Экономика в этом чате отключена.")
+        return
+    await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    starting = int(await db.get_setting("starting_balance"))
+    await db.ensure_wallet(message.from_user.id, starting)
+
+    amount = int(await db.get_setting("daily_bonus_amount"))
+    cooldown = int(await db.get_setting("daily_bonus_cooldown_sec"))
+    currency = await db.get_setting("currency_name")
+
+    success, remaining = await db.try_claim_daily(message.from_user.id, amount, cooldown)
+    if not success:
+        hours = remaining // 3600
+        minutes = (remaining % 3600) // 60
+        await message.reply(f"⏳ Ежедневный бонус уже получен. Приходите через {hours} ч {minutes} мин.")
+        return
+
+    balance = await db.get_balance(message.from_user.id)
+    await message.reply(f"🎁 Ежедневный бонус получен: +{amount} {currency}!\nБаланс: {balance} {currency}")
+
+
+@router.message(Command("give"))
+async def cmd_give(message: Message, bot: Bot, command: CommandObject):
+    """Выдать монеты участнику (только администраторы)."""
+    target = await _require_admin_and_target(message, bot)
+    if not target:
+        return
+    if not command.args:
+        await message.reply("Использование: /give <количество> (ответом на сообщение участника)")
+        return
+    try:
+        amount = int(command.args.split()[0])
+    except ValueError:
+        await message.reply("Использование: /give <количество>")
+        return
+
+    await db.ensure_member(target.id, target.username, target.full_name)
+    starting = int(await db.get_setting("starting_balance"))
+    await db.ensure_wallet(target.id, starting)
+    new_balance = await db.add_balance(target.id, amount, f"admin_grant:{message.from_user.id}")
+    await db.add_log("give", target.id, message.from_user.id, f"amount={amount}")
+    currency = await db.get_setting("currency_name")
+    await message.reply(f"✅ {target.mention_html()} получил(а) {amount} {currency}. Баланс: {new_balance}")
+
+
+@router.message(Command("achievements"))
+async def cmd_achievements(message: Message):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    earned = await db.get_user_achievements(message.from_user.id)
+    all_ach = await db.get_all_achievements()
+    earned_keys = {a["key"] for a in earned}
+
+    lines = ["🏆 <b>Достижения</b>", ""]
+    for ach in all_ach:
+        mark = "✅" if ach["key"] in earned_keys else "🔒"
+        lines.append(f"{mark} {ach['title']} — {ach['description']}")
+    await message.reply("\n".join(lines))
+
+
+@router.message(Command("dice"))
+async def cmd_dice(message: Message, command: CommandObject):
+    """Мини-игра: ставка на кубик 1-6. Выпало 4-6 — выигрыш x2, иначе ставка сгорает."""
+    if not _is_allowed_chat(message.chat.id):
+        return
+    if not await db.get_bool_setting("economy_enabled") or not await db.get_bool_setting("minigames_enabled"):
+        await message.reply("Мини-игры сейчас отключены.")
+        return
+    if not command.args:
+        await message.reply("Использование: /dice <ставка>")
+        return
+    try:
+        bet = int(command.args.split()[0])
+    except ValueError:
+        await message.reply("Использование: /dice <ставка>")
+        return
+
+    min_bet = int(await db.get_setting("dice_min_bet"))
+    max_bet = int(await db.get_setting("dice_max_bet"))
+    currency = await db.get_setting("currency_name")
+
+    if bet < min_bet or bet > max_bet:
+        await message.reply(f"Ставка должна быть от {min_bet} до {max_bet} {currency}.")
+        return
+
+    await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    starting = int(await db.get_setting("starting_balance"))
+    await db.ensure_wallet(message.from_user.id, starting)
+    balance = await db.get_balance(message.from_user.id)
+    if balance < bet:
+        await message.reply(f"Недостаточно средств. Ваш баланс: {balance} {currency}.")
+        return
+
+    roll_msg = await message.answer_dice(emoji="🎲")
+    await asyncio.sleep(3)  # дать анимации кубика доиграть перед оглашением результата
+    value = roll_msg.dice.value  # 1..6
+
+    if value >= 4:
+        winnings = bet  # чистый выигрыш (итого возвращается ставка + столько же)
+        new_balance = await db.add_balance(message.from_user.id, winnings, "dice_win")
+        await message.reply(f"🎲 Выпало {value}! Вы выиграли {winnings} {currency}.\nБаланс: {new_balance}")
+    else:
+        new_balance = await db.add_balance(message.from_user.id, -bet, "dice_loss")
+        await message.reply(f"🎲 Выпало {value}. Вы проиграли {bet} {currency}.\nБаланс: {new_balance}")
 
 
 # ---------------------------------------------------------------------------
 # Обработка обычных сообщений: модерация + XP
 # ---------------------------------------------------------------------------
+
+async def _process_engagement(bot: Bot, chat_id: int, user):
+    """Общий хук вовлечения после засчитанного сообщения: XP/уровень, монеты за сообщение, достижения."""
+    new_level = await db.bump_message_count(user.id)
+
+    if await db.get_bool_setting("economy_enabled"):
+        reward = int(await db.get_setting("message_reward"))
+        cooldown = int(await db.get_setting("message_reward_cooldown_sec"))
+        await db.try_claim_message_reward(user.id, reward, cooldown)
+
+    if new_level is not None and new_level > 0:
+        bonus_text = ""
+        if await db.get_bool_setting("economy_enabled"):
+            bonus = int(await db.get_setting("levelup_bonus_amount"))
+            await db.add_balance(user.id, bonus, "levelup_bonus")
+            currency = await db.get_setting("currency_name")
+            bonus_text = f" (+{bonus} {currency})"
+        try:
+            await bot.send_message(chat_id, f"🎉 {user.mention_html()} достиг {new_level} уровня!{bonus_text}")
+        except Exception:
+            pass
+
+    for ach in await db.check_and_award_achievements(user.id):
+        try:
+            await bot.send_message(
+                chat_id, f"🏆 {user.mention_html()} получил(а) достижение «{ach['title']}»!\n{ach['description']}"
+            )
+        except Exception:
+            pass
+
 
 @router.message(F.text | F.caption)
 async def on_message(message: Message, bot: Bot):
@@ -539,8 +713,8 @@ async def on_message(message: Message, bot: Bot):
     await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
 
     if role in ("admin", "moderator"):
-        # Админов и модераторов не модерируем, но считаем сообщения/XP
-        await db.bump_message_count(message.from_user.id)
+        # Админов и модераторов не модерируем, но считаем сообщения/XP/монеты
+        await _process_engagement(bot, message.chat.id, message.from_user)
         return
 
     text = message.text or message.caption or ""
@@ -590,15 +764,7 @@ async def on_message(message: Message, bot: Bot):
             pass
         return
 
-    new_level = await db.bump_message_count(message.from_user.id)
-    if new_level is not None and new_level > 0:
-        try:
-            await bot.send_message(
-                message.chat.id,
-                f"🎉 {message.from_user.mention_html()} достиг {new_level} уровня!",
-            )
-        except Exception:
-            pass
+    await _process_engagement(bot, message.chat.id, message.from_user)
 
 
 # ---------------------------------------------------------------------------

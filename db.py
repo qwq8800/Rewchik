@@ -85,6 +85,36 @@ CREATE TABLE IF NOT EXISTS pending_captcha (
     correct_answer TEXT,
     deadline INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS wallets (
+    user_id INTEGER PRIMARY KEY,
+    balance INTEGER DEFAULT 0,
+    last_message_reward_at INTEGER DEFAULT 0,
+    last_daily_at INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    amount INTEGER,
+    reason TEXT,
+    created_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS achievements (
+    key TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT,
+    condition_type TEXT NOT NULL,
+    condition_value INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_achievements (
+    user_id INTEGER,
+    achievement_key TEXT,
+    earned_at INTEGER,
+    PRIMARY KEY (user_id, achievement_key)
+);
 """
 
 _conn: Optional[aiosqlite.Connection] = None
@@ -107,6 +137,13 @@ async def init_db():
 
     for domain in config.DEFAULT_AD_DOMAINS:
         await _conn.execute("INSERT OR IGNORE INTO ad_domains (domain) VALUES (?)", (domain.lower(),))
+
+    for key, title, desc, cond_type, cond_value in config.DEFAULT_ACHIEVEMENTS:
+        await _conn.execute(
+            "INSERT OR IGNORE INTO achievements (key, title, description, condition_type, condition_value) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (key, title, desc, cond_type, cond_value),
+        )
 
     await _conn.commit()
 
@@ -467,3 +504,130 @@ async def chat_overview() -> dict:
         "total_messages": total_messages,
         "violations_24h": violations_24h,
     }
+
+
+# ---------- ECONOMY ----------
+
+async def ensure_wallet(user_id: int, starting_balance: int = 0):
+    await _conn.execute(
+        "INSERT OR IGNORE INTO wallets (user_id, balance, last_message_reward_at, last_daily_at) "
+        "VALUES (?, ?, 0, 0)",
+        (user_id, starting_balance),
+    )
+    await _conn.commit()
+
+
+async def get_wallet(user_id: int):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute("SELECT * FROM wallets WHERE user_id = ?", (user_id,)) as cur:
+        return await cur.fetchone()
+
+
+async def get_balance(user_id: int) -> int:
+    w = await get_wallet(user_id)
+    return w["balance"] if w else 0
+
+
+async def add_balance(user_id: int, amount: int, reason: str) -> int:
+    await ensure_wallet(user_id)
+    await _conn.execute("UPDATE wallets SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+    await _conn.execute(
+        "INSERT INTO transactions (user_id, amount, reason, created_at) VALUES (?, ?, ?, ?)",
+        (user_id, amount, reason, int(time.time())),
+    )
+    await _conn.commit()
+    return await get_balance(user_id)
+
+
+async def try_claim_message_reward(user_id: int, amount: int, cooldown_sec: int) -> bool:
+    """Начисляет монеты за сообщение не чаще, чем раз в cooldown_sec (защита от спам-фарма экономики)."""
+    await ensure_wallet(user_id)
+    w = await get_wallet(user_id)
+    now = int(time.time())
+    if now - (w["last_message_reward_at"] or 0) < cooldown_sec:
+        return False
+    await _conn.execute("UPDATE wallets SET last_message_reward_at = ? WHERE user_id = ?", (now, user_id))
+    await _conn.commit()
+    await add_balance(user_id, amount, "message_reward")
+    return True
+
+
+async def try_claim_daily(user_id: int, amount: int, cooldown_sec: int) -> tuple[bool, int]:
+    """Возвращает (успех, секунд_до_след_попытки)."""
+    await ensure_wallet(user_id)
+    w = await get_wallet(user_id)
+    now = int(time.time())
+    elapsed = now - (w["last_daily_at"] or 0)
+    if elapsed < cooldown_sec:
+        return False, cooldown_sec - elapsed
+    await _conn.execute("UPDATE wallets SET last_daily_at = ? WHERE user_id = ?", (now, user_id))
+    await _conn.commit()
+    await add_balance(user_id, amount, "daily_bonus")
+    return True, 0
+
+
+async def top_balance(limit: int = 10):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute(
+        "SELECT w.user_id, w.balance, m.username, m.full_name FROM wallets w "
+        "LEFT JOIN members m ON m.user_id = w.user_id ORDER BY w.balance DESC LIMIT ?",
+        (limit,),
+    ) as cur:
+        return await cur.fetchall()
+
+
+# ---------- ACHIEVEMENTS ----------
+
+async def get_all_achievements():
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute("SELECT * FROM achievements") as cur:
+        return await cur.fetchall()
+
+
+async def get_user_achievements(user_id: int):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute(
+        "SELECT a.* FROM user_achievements ua JOIN achievements a ON a.key = ua.achievement_key "
+        "WHERE ua.user_id = ? ORDER BY ua.earned_at",
+        (user_id,),
+    ) as cur:
+        return await cur.fetchall()
+
+
+async def has_achievement(user_id: int, key: str) -> bool:
+    async with _conn.execute(
+        "SELECT 1 FROM user_achievements WHERE user_id = ? AND achievement_key = ?", (user_id, key)
+    ) as cur:
+        return await cur.fetchone() is not None
+
+
+async def award_achievement(user_id: int, key: str) -> bool:
+    """Возвращает True, если достижение было выдано впервые (False, если уже было)."""
+    if await has_achievement(user_id, key):
+        return False
+    await _conn.execute(
+        "INSERT INTO user_achievements (user_id, achievement_key, earned_at) VALUES (?, ?, ?)",
+        (user_id, key, int(time.time())),
+    )
+    await _conn.commit()
+    return True
+
+
+async def check_and_award_achievements(user_id: int) -> list:
+    """Проверяет прогресс участника по всем достижениям и выдаёт новые. Возвращает список новых (Row)."""
+    member = await get_member(user_id)
+    if member is None:
+        return []
+    rep = await get_reputation(user_id)
+
+    stats = {"messages": member["message_count"], "level": member["level"], "reputation": rep}
+
+    newly_awarded = []
+    for ach in await get_all_achievements():
+        current = stats.get(ach["condition_type"])
+        if current is None:
+            continue
+        if current >= ach["condition_value"]:
+            if await award_achievement(user_id, ach["key"]):
+                newly_awarded.append(ach)
+    return newly_awarded

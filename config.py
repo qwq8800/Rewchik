@@ -46,6 +46,19 @@ DEFAULT_SETTINGS = {
     "captcha_timeout_sec": "120",        # сколько времени даётся новичку на подтверждение
     "reputation_enabled": "1",
     "reputation_cooldown_sec": "3600",   # раз в сколько времени можно выдать +1 репутации тому же человеку
+    # --- Экономика ---
+    "economy_enabled": "1",
+    "currency_name": "монет",
+    "starting_balance": "100",
+    "message_reward": "1",              # монет за сообщение (учитывается вместе с антифлуд-кулдауном XP)
+    "message_reward_cooldown_sec": "30",  # не начислять монеты чаще, чем раз в N секунд
+    "daily_bonus_amount": "50",
+    "daily_bonus_cooldown_sec": "86400",
+    "levelup_bonus_amount": "20",        # бонус монет при повышении уровня
+    # --- Мини-игры ---
+    "minigames_enabled": "1",
+    "dice_min_bet": "5",
+    "dice_max_bet": "500",
     # Лестница наказаний (в секундах, для мутов). После исчерпания списка — бан.
     "punishment_ladder": "300,1800,10800,86400",
 }
@@ -65,4 +78,16 @@ DEFAULT_AD_DOMAINS = [
 # Кастомные роли чата (раздел "Роли" ТЗ, упрощённая версия: одна выдаваемая роль
 # поверх стандартных прав Telegram creator/administrator).
 ROLE_MODERATOR = "moderator"
+
+# Достижения по умолчанию (раздел "Достижения" ТЗ).
+# type: "messages" | "level" | "reputation"
+DEFAULT_ACHIEVEMENTS = [
+    ("first_message", "🌱 Новичок", "Написать первое сообщение в чате", "messages", 1),
+    ("chatty", "💬 Активный участник", "Написать 100 сообщений", "messages", 100),
+    ("veteran", "🏅 Ветеран чата", "Написать 1000 сообщений", "messages", 1000),
+    ("level5", "⭐ Опытный", "Достичь 5 уровня", "level", 5),
+    ("level10", "🌟 Легенда чата", "Достичь 10 уровня", "level", 10),
+    ("respected", "🤝 Уважаемый", "Набрать 10 репутации", "reputation", 10),
+]
+
 

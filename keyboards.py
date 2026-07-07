@@ -15,10 +15,12 @@ def main_menu() -> InlineKeyboardMarkup:
     b.button(text="👥 Пользователи", callback_data="panel:users")
     b.button(text="🎭 Роли", callback_data="panel:roles")
     b.button(text="⭐ Репутация", callback_data="panel:reputation")
+    b.button(text="💰 Экономика", callback_data="panel:economy")
+    b.button(text="🏆 Достижения", callback_data="panel:achievements")
     b.button(text="📊 Статистика", callback_data="panel:stats")
     b.button(text="⚙️ Настройки", callback_data="panel:settings")
     b.button(text="❌ Закрыть", callback_data="panel:close")
-    b.adjust(2, 2, 2, 2)
+    b.adjust(2, 2, 2, 2, 2)
     return b.as_markup()
 
 
@@ -63,6 +65,28 @@ def back_only_menu(target: str = "panel:main") -> InlineKeyboardMarkup:
 def roles_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="🔙 Назад", callback_data="panel:main")
+    return b.as_markup()
+
+
+async def economy_menu() -> InlineKeyboardMarkup:
+    settings = await db.get_all_settings()
+    b = InlineKeyboardBuilder()
+
+    def onoff(key):
+        return "✅ Вкл" if settings.get(key) == "1" else "⛔ Выкл"
+
+    b.button(text=f"Экономика: {onoff('economy_enabled')}", callback_data="panel:economy:toggle:economy_enabled")
+    b.button(text=f"Мини-игры: {onoff('minigames_enabled')}", callback_data="panel:economy:toggle:minigames_enabled")
+    b.button(
+        text=f"Награда/сообщение: {settings.get('message_reward')} {settings.get('currency_name')}",
+        callback_data="panel:economy:info",
+    )
+    b.button(
+        text=f"Ежедневный бонус: {settings.get('daily_bonus_amount')} {settings.get('currency_name')}",
+        callback_data="panel:economy:info",
+    )
+    b.button(text="🔙 Назад", callback_data="panel:main")
+    b.adjust(1)
     return b.as_markup()
 
 

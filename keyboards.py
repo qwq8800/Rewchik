@@ -16,11 +16,12 @@ def main_menu() -> InlineKeyboardMarkup:
     b.button(text="🎭 Роли", callback_data="panel:roles")
     b.button(text="⭐ Репутация", callback_data="panel:reputation")
     b.button(text="💰 Экономика", callback_data="panel:economy")
+    b.button(text="🛒 Магазин", callback_data="panel:shop")
     b.button(text="🏆 Достижения", callback_data="panel:achievements")
     b.button(text="📊 Статистика", callback_data="panel:stats")
     b.button(text="⚙️ Настройки", callback_data="panel:settings")
     b.button(text="❌ Закрыть", callback_data="panel:close")
-    b.adjust(2, 2, 2, 2, 2)
+    b.adjust(2, 2, 2, 2, 2, 1)
     return b.as_markup()
 
 

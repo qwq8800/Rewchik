@@ -115,6 +115,22 @@ CREATE TABLE IF NOT EXISTS user_achievements (
     earned_at INTEGER,
     PRIMARY KEY (user_id, achievement_key)
 );
+
+CREATE TABLE IF NOT EXISTS shop_items (
+    key TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT,
+    price INTEGER NOT NULL,
+    active INTEGER DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS inventory (
+    user_id INTEGER,
+    item_key TEXT,
+    quantity INTEGER DEFAULT 0,
+    equipped INTEGER DEFAULT 0,
+    PRIMARY KEY (user_id, item_key)
+);
 """
 
 _conn: Optional[aiosqlite.Connection] = None
@@ -143,6 +159,12 @@ async def init_db():
             "INSERT OR IGNORE INTO achievements (key, title, description, condition_type, condition_value) "
             "VALUES (?, ?, ?, ?, ?)",
             (key, title, desc, cond_type, cond_value),
+        )
+
+    for key, title, desc, price in config.DEFAULT_SHOP_ITEMS:
+        await _conn.execute(
+            "INSERT OR IGNORE INTO shop_items (key, title, description, price, active) VALUES (?, ?, ?, ?, 1)",
+            (key, title, desc, price),
         )
 
     await _conn.commit()
@@ -264,6 +286,13 @@ async def list_muted(limit: int = 8, offset: int = 0):
         "SELECT * FROM members WHERE is_muted = 1 ORDER BY muted_until DESC LIMIT ? OFFSET ?",
         (limit, offset),
     ) as cur:
+        return await cur.fetchall()
+
+
+async def list_all_muted():
+    """Без пагинации — используется для восстановления таймеров автоснятия мута при старте бота."""
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute("SELECT * FROM members WHERE is_muted = 1") as cur:
         return await cur.fetchall()
 
 
@@ -478,6 +507,13 @@ async def get_pending_captcha(user_id: int):
         return await cur.fetchone()
 
 
+async def list_all_pending_captcha():
+    """Используется для восстановления таймеров капчи при старте бота после рестарта процесса."""
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute("SELECT * FROM pending_captcha") as cur:
+        return await cur.fetchall()
+
+
 async def remove_pending_captcha(user_id: int):
     await _conn.execute("DELETE FROM pending_captcha WHERE user_id = ?", (user_id,))
     await _conn.commit()
@@ -631,3 +667,81 @@ async def check_and_award_achievements(user_id: int) -> list:
             if await award_achievement(user_id, ach["key"]):
                 newly_awarded.append(ach)
     return newly_awarded
+
+
+# ---------- SHOP / INVENTORY ----------
+
+async def get_shop_items(active_only: bool = True):
+    _conn.row_factory = aiosqlite.Row
+    if active_only:
+        async with _conn.execute("SELECT * FROM shop_items WHERE active = 1 ORDER BY price") as cur:
+            return await cur.fetchall()
+    async with _conn.execute("SELECT * FROM shop_items ORDER BY price") as cur:
+        return await cur.fetchall()
+
+
+async def get_shop_item(key: str):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute("SELECT * FROM shop_items WHERE key = ?", (key,)) as cur:
+        return await cur.fetchone()
+
+
+async def get_inventory(user_id: int):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute(
+        "SELECT inv.*, s.title, s.description FROM inventory inv "
+        "JOIN shop_items s ON s.key = inv.item_key WHERE inv.user_id = ? AND inv.quantity > 0",
+        (user_id,),
+    ) as cur:
+        return await cur.fetchall()
+
+
+async def get_inventory_item(user_id: int, item_key: str):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute(
+        "SELECT * FROM inventory WHERE user_id = ? AND item_key = ?", (user_id, item_key)
+    ) as cur:
+        return await cur.fetchone()
+
+
+async def buy_item(user_id: int, item_key: str) -> tuple[bool, str]:
+    """Покупка предмета за монеты. Возвращает (успех, сообщение_об_ошибке_если_есть)."""
+    item = await get_shop_item(item_key)
+    if item is None or not item["active"]:
+        return False, "Такого товара нет в магазине."
+
+    balance = await get_balance(user_id)
+    if balance < item["price"]:
+        return False, f"Недостаточно средств. Нужно {item['price']}, у вас {balance}."
+
+    await add_balance(user_id, -item["price"], f"shop_buy:{item_key}")
+    await _conn.execute(
+        "INSERT INTO inventory (user_id, item_key, quantity, equipped) VALUES (?, ?, 1, 0) "
+        "ON CONFLICT(user_id, item_key) DO UPDATE SET quantity = quantity + 1",
+        (user_id, item_key),
+    )
+    await _conn.commit()
+    return True, ""
+
+
+async def equip_item(user_id: int, item_key: str) -> bool:
+    """Экипировать бейдж (снимает предыдущий экипированный, если был). Возвращает False, если предмета нет в инвентаре."""
+    owned = await get_inventory_item(user_id, item_key)
+    if owned is None or owned["quantity"] < 1:
+        return False
+    await _conn.execute("UPDATE inventory SET equipped = 0 WHERE user_id = ?", (user_id,))
+    await _conn.execute(
+        "UPDATE inventory SET equipped = 1 WHERE user_id = ? AND item_key = ?", (user_id, item_key)
+    )
+    await _conn.commit()
+    return True
+
+
+async def get_equipped_badge(user_id: int):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute(
+        "SELECT s.* FROM inventory inv JOIN shop_items s ON s.key = inv.item_key "
+        "WHERE inv.user_id = ? AND inv.equipped = 1 LIMIT 1",
+        (user_id,),
+    ) as cur:
+        return await cur.fetchone()

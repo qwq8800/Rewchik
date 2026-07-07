@@ -8,6 +8,7 @@
 import asyncio
 import logging
 import random
+import time
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
@@ -147,7 +148,7 @@ async def on_member_join(event: ChatMemberUpdated, bot: Bot):
     random.shuffle(options)
 
     timeout = int(await db.get_setting("captcha_timeout_sec"))
-    deadline = int(asyncio.get_event_loop().time()) + timeout
+    deadline = int(time.time()) + timeout
 
     try:
         sent = await bot.send_message(
@@ -443,8 +444,12 @@ async def cmd_rank(message: Message):
         await message.reply("Данных пока нет — напишите пару сообщений в чат.")
         return
     rep = await db.get_reputation(message.from_user.id)
+    badge = await db.get_equipped_badge(message.from_user.id)
+    title_line = f"📈 <b>{message.from_user.full_name}</b>"
+    if badge:
+        title_line += f" {badge['title'].split(' ', 1)[0]}"  # эмодзи бейджа рядом с именем
     lines = [
-        f"📈 <b>{message.from_user.full_name}</b>",
+        title_line,
         f"Уровень: {m['level']}\nXP: {m['xp']}\nСообщений: {m['message_count']}",
         f"Варнов: {m['warns_count']}\nРепутация: {rep}",
     ]
@@ -680,6 +685,85 @@ async def cmd_dice(message: Message, command: CommandObject):
         await message.reply(f"🎲 Выпало {value}. Вы проиграли {bet} {currency}.\nБаланс: {new_balance}")
 
 
+@router.message(Command("shop"))
+async def cmd_shop(message: Message):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    if not await db.get_bool_setting("economy_enabled"):
+        await message.reply("Экономика в этом чате отключена.")
+        return
+    items = await db.get_shop_items()
+    if not items:
+        await message.reply("Магазин пока пуст.")
+        return
+    currency = await db.get_setting("currency_name")
+    lines = ["🛒 <b>Магазин</b>", ""]
+    for item in items:
+        lines.append(f"<code>{item['key']}</code> — {item['title']} — {item['price']} {currency}\n{item['description']}")
+    lines.append("\nКупить: /buy <код_товара>")
+    await message.reply("\n\n".join(lines))
+
+
+@router.message(Command("buy"))
+async def cmd_buy(message: Message, command: CommandObject):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    if not await db.get_bool_setting("economy_enabled"):
+        await message.reply("Экономика в этом чате отключена.")
+        return
+    if not command.args:
+        await message.reply("Использование: /buy <код_товара> (см. /shop)")
+        return
+
+    item_key = command.args.split()[0].strip()
+    await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    starting = int(await db.get_setting("starting_balance"))
+    await db.ensure_wallet(message.from_user.id, starting)
+
+    success, error = await db.buy_item(message.from_user.id, item_key)
+    if not success:
+        await message.reply(f"❌ {error}")
+        return
+
+    item = await db.get_shop_item(item_key)
+    await db.add_log("shop_buy", message.from_user.id, None, item_key)
+    await message.reply(
+        f"✅ Куплено: {item['title']}!\nПрименить его как активный бейдж: /equip {item_key}"
+    )
+
+
+@router.message(Command("inventory"))
+async def cmd_inventory(message: Message):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    rows = await db.get_inventory(message.from_user.id)
+    if not rows:
+        await message.reply("🎒 Ваш инвентарь пуст. Загляните в /shop.")
+        return
+    lines = ["🎒 <b>Ваш инвентарь</b>", ""]
+    for r in rows:
+        mark = " (экипирован)" if r["equipped"] else ""
+        lines.append(f"• {r['title']} × {r['quantity']}{mark}")
+    lines.append("\nЭкипировать: /equip <код_товара>")
+    await message.reply("\n".join(lines))
+
+
+@router.message(Command("equip"))
+async def cmd_equip(message: Message, command: CommandObject):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    if not command.args:
+        await message.reply("Использование: /equip <код_товара> (см. /inventory)")
+        return
+    item_key = command.args.split()[0].strip()
+    ok = await db.equip_item(message.from_user.id, item_key)
+    if not ok:
+        await message.reply("У вас нет такого предмета. Проверьте /inventory.")
+        return
+    item = await db.get_shop_item(item_key)
+    await message.reply(f"✅ Бейдж «{item['title']}» теперь отображается в /rank.")
+
+
 # ---------------------------------------------------------------------------
 # Обработка обычных сообщений: модерация + XP
 # ---------------------------------------------------------------------------
@@ -789,6 +873,51 @@ async def on_message(message: Message, bot: Bot):
 
 
 # ---------------------------------------------------------------------------
+# Восстановление состояния после рестарта процесса
+# ---------------------------------------------------------------------------
+
+async def _reconcile_after_restart(bot: Bot):
+    """При каждом старте бота (в т.ч. после деплоя/краша на Railway) восстанавливает
+    таймеры автоснятия мута и капчи, которые хранились только в памяти предыдущего
+    процесса и были бы потеряны. Источник истины — БД (muted_until / deadline)."""
+    now = int(time.time())
+
+    pending_list = await db.list_all_pending_captcha()
+    for pending in pending_list:
+        remaining = pending["deadline"] - now
+        if remaining <= 0:
+            await db.remove_pending_captcha(pending["user_id"])
+            try:
+                await bot.delete_message(config.ALLOWED_CHAT_ID, pending["join_message_id"])
+            except Exception:
+                pass
+            try:
+                await bot.ban_chat_member(config.ALLOWED_CHAT_ID, pending["user_id"])
+                await bot.unban_chat_member(config.ALLOWED_CHAT_ID, pending["user_id"], only_if_banned=True)
+            except Exception as e:
+                logger.warning(f"Reconcile: не удалось кикнуть просроченную капчу {pending['user_id']}: {e}")
+            await db.add_log("captcha_timeout_kick", pending["user_id"], None, "reconciled_after_restart")
+        else:
+            asyncio.create_task(
+                _captcha_timeout_kick(bot, config.ALLOWED_CHAT_ID, pending["user_id"], pending["join_message_id"], remaining)
+            )
+
+    muted_list = await db.list_all_muted()
+    for member in muted_list:
+        remaining = member["muted_until"] - now
+        if remaining <= 0:
+            await punishments.unmute_user(bot, config.ALLOWED_CHAT_ID, member["user_id"], automatic=True)
+        else:
+            asyncio.create_task(punishments._auto_unmute(bot, config.ALLOWED_CHAT_ID, member["user_id"], remaining))
+
+    if pending_list or muted_list:
+        logger.info(
+            "Восстановлено после рестарта: %d капч(и) в ожидании, %d активных мутов.",
+            len(pending_list), len(muted_list),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Запуск
 # ---------------------------------------------------------------------------
 
@@ -810,6 +939,7 @@ async def main():
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)
+        await _reconcile_after_restart(bot)
         await dp.start_polling(bot)
     finally:
         await db.close_db()

@@ -155,6 +155,16 @@ async def panel_router(callback: CallbackQuery, bot: Bot):
             lines.append(f"• {ach['title']} — {ach['description']}")
         await callback.message.edit_text("\n".join(lines), reply_markup=keyboards.back_only_menu())
 
+    elif section == "shop":
+        items = await db.get_shop_items(active_only=False)
+        currency = await db.get_setting("currency_name")
+        lines = ["🛒 <b>Товары магазина</b>", ""]
+        for item in items:
+            status = "✅" if item["active"] else "⛔ (скрыт)"
+            lines.append(f"{status} <code>{item['key']}</code> — {item['title']} — {item['price']} {currency}")
+        lines.append("\nУчастники покупают через /buy <код> в чате. Список кодов см. выше.")
+        await callback.message.edit_text("\n".join(lines), reply_markup=keyboards.back_only_menu())
+
     elif section == "settings":
         if len(parts) == 2:
             await callback.message.edit_text("⚙️ <b>Настройки</b>", reply_markup=await keyboards.settings_menu())

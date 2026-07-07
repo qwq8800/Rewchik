@@ -44,6 +44,7 @@ DEFAULT_SETTINGS = {
     "farewell_text": "👋 {user_mention} покинул(а) чат.",
     "captcha_enabled": "1",
     "captcha_timeout_sec": "120",        # сколько времени даётся новичку на подтверждение
+    "warn_expiry_days": "30",            # предупреждения старше N дней не учитываются при эскалации наказаний
     "reputation_enabled": "1",
     "reputation_cooldown_sec": "3600",   # раз в сколько времени можно выдать +1 репутации тому же человеку
     # --- Экономика ---

@@ -61,7 +61,8 @@ async def panel_router(callback: CallbackQuery, bot: Bot):
 
     elif section == "mod" and parts[2] == "info":
         await callback.answer(
-            "Изменить пороги можно командой /setflood <лимит> <окно_сек> в чате (ответом на любое сообщение).",
+            "Настройки в чате: /setflood <лимит> <окно_сек>, /setwarnexpiry <дней>, "
+            "/addword /delword /words (стоп-слова), /adddomain /deldomain /domains (домены).",
             show_alert=True,
         )
 

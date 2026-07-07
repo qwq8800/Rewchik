@@ -435,6 +435,107 @@ async def cmd_setwelcome(message: Message, bot: Bot, command: CommandObject):
     await message.reply("✅ Текст приветствия обновлён.")
 
 
+async def _require_admin(message: Message, bot: Bot) -> bool:
+    if not _is_group_chat(message.chat.id):
+        return False
+    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    if member.status not in ("creator", "administrator"):
+        await message.reply("⛔ Эта команда доступна только администраторам.")
+        return False
+    return True
+
+
+@router.message(Command("addword"))
+async def cmd_addword(message: Message, bot: Bot, command: CommandObject):
+    if not await _require_admin(message, bot):
+        return
+    if not command.args:
+        await message.reply("Использование: /addword <слово или фраза>")
+        return
+    word = command.args.strip()
+    await db.add_banned_word(word)
+    await db.add_log("addword", message.from_user.id, message.from_user.id, word)
+    await message.reply(f"✅ «{word}» добавлено в стоп-слова.")
+
+
+@router.message(Command("delword"))
+async def cmd_delword(message: Message, bot: Bot, command: CommandObject):
+    if not await _require_admin(message, bot):
+        return
+    if not command.args:
+        await message.reply("Использование: /delword <слово или фраза>")
+        return
+    word = command.args.strip()
+    await db.remove_banned_word(word)
+    await db.add_log("delword", message.from_user.id, message.from_user.id, word)
+    await message.reply(f"✅ «{word}» удалено из стоп-слов.")
+
+
+@router.message(Command("words"))
+async def cmd_words(message: Message, bot: Bot):
+    if not await _require_admin(message, bot):
+        return
+    words = await db.get_banned_words()
+    if not words:
+        await message.reply("Список стоп-слов пуст.")
+        return
+    await message.reply("🚫 <b>Стоп-слова</b>\n\n" + "\n".join(f"• {w}" for w in words))
+
+
+@router.message(Command("adddomain"))
+async def cmd_adddomain(message: Message, bot: Bot, command: CommandObject):
+    if not await _require_admin(message, bot):
+        return
+    if not command.args:
+        await message.reply("Использование: /adddomain <домен, например spam.ru>")
+        return
+    domain = command.args.strip()
+    await db.add_ad_domain(domain)
+    await db.add_log("adddomain", message.from_user.id, message.from_user.id, domain)
+    await message.reply(f"✅ «{domain}» добавлен в чёрный список доменов.")
+
+
+@router.message(Command("deldomain"))
+async def cmd_deldomain(message: Message, bot: Bot, command: CommandObject):
+    if not await _require_admin(message, bot):
+        return
+    if not command.args:
+        await message.reply("Использование: /deldomain <домен>")
+        return
+    domain = command.args.strip()
+    await db.remove_ad_domain(domain)
+    await db.add_log("deldomain", message.from_user.id, message.from_user.id, domain)
+    await message.reply(f"✅ «{domain}» удалён из чёрного списка доменов.")
+
+
+@router.message(Command("domains"))
+async def cmd_domains(message: Message, bot: Bot):
+    if not await _require_admin(message, bot):
+        return
+    domains = await db.get_ad_domains()
+    if not domains:
+        await message.reply("Чёрный список доменов пуст.")
+        return
+    await message.reply("🚫 <b>Чёрный список доменов</b>\n\n" + "\n".join(f"• {d}" for d in domains))
+
+
+@router.message(Command("setwarnexpiry"))
+async def cmd_setwarnexpiry(message: Message, bot: Bot, command: CommandObject):
+    if not await _require_admin(message, bot):
+        return
+    if not command.args:
+        current = await db.get_setting("warn_expiry_days")
+        await message.reply(f"Текущий срок действия предупреждений: {current} дней.\nИзменить: /setwarnexpiry <дней>")
+        return
+    try:
+        days = int(command.args.split()[0])
+    except ValueError:
+        await message.reply("Использование: /setwarnexpiry <дней>")
+        return
+    await db.set_setting("warn_expiry_days", str(days))
+    await message.reply(f"✅ Предупреждения теперь действуют {days} дней.")
+
+
 @router.message(Command("rank"))
 async def cmd_rank(message: Message):
     if not _is_allowed_chat(message.chat.id):

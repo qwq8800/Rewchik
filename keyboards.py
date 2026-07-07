@@ -43,6 +43,7 @@ async def moderation_menu() -> InlineKeyboardMarkup:
         text=f"Порог флуда: {settings.get('antiflood_limit')} msg / {settings.get('antiflood_window_sec')}s",
         callback_data="panel:mod:info:antiflood",
     )
+    b.button(text=f"Срок действия варнов: {settings.get('warn_expiry_days')} дн.", callback_data="panel:mod:info:antiflood")
     b.button(text="🔙 Назад", callback_data="panel:main")
     b.adjust(1)
     return b.as_markup()

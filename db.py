@@ -320,6 +320,9 @@ async def count_banned() -> int:
 # ---------- WARNINGS ----------
 
 async def add_warning(user_id: int, reason: str, moderator_id: int) -> int:
+    """Возвращает количество ДЕЙСТВУЮЩИХ (не просроченных) предупреждений — используется
+    для эскалации наказаний. Общий счётчик warns_count в members — это счётчик за всё время
+    (для профиля /rank), он не уменьшается при истечении срока."""
     await _conn.execute(
         "INSERT INTO warnings (user_id, reason, moderator_id, created_at, active) VALUES (?, ?, ?, ?, 1)",
         (user_id, reason, moderator_id, int(time.time())),
@@ -328,16 +331,17 @@ async def add_warning(user_id: int, reason: str, moderator_id: int) -> int:
         "UPDATE members SET warns_count = warns_count + 1 WHERE user_id = ?", (user_id,)
     )
     await _conn.commit()
-    async with _conn.execute(
-        "SELECT COUNT(*) FROM warnings WHERE user_id = ? AND active = 1", (user_id,)
-    ) as cur:
-        row = await cur.fetchone()
-        return row[0]
+    return await count_active_warnings(user_id)
 
 
 async def count_active_warnings(user_id: int) -> int:
+    """Считает варны за последние warn_expiry_days дней — старые предупреждения
+    "прощаются" и не утяжеляют эскалацию наказаний бесконечно."""
+    expiry_days = int(await get_setting("warn_expiry_days") or "30")
+    cutoff = int(time.time()) - expiry_days * 86400
     async with _conn.execute(
-        "SELECT COUNT(*) FROM warnings WHERE user_id = ? AND active = 1", (user_id,)
+        "SELECT COUNT(*) FROM warnings WHERE user_id = ? AND active = 1 AND created_at >= ?",
+        (user_id, cutoff),
     ) as cur:
         row = await cur.fetchone()
         return row[0]

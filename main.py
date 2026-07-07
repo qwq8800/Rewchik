@@ -66,8 +66,15 @@ async def on_bot_added_to_chat(event: ChatMemberUpdated, bot: Bot):
 
 
 def _is_allowed_chat(chat_id: int) -> bool:
-    # Личные сообщения (chat_id > 0) всегда разрешены
+    # Личные сообщения (chat_id > 0) разрешены для информационных команд (см. cmd_start).
     return chat_id > 0 or chat_id == config.ALLOWED_CHAT_ID
+
+
+def _is_group_chat(chat_id: int) -> bool:
+    """Строгая проверка для всего, что требует прав/контекста группы: модерация, капча,
+    вход/выход участников, админ-команды (используют bot.get_chat_member, что не имеет
+    смысла в личных сообщениях)."""
+    return chat_id == config.ALLOWED_CHAT_ID
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +118,7 @@ def _captcha_keyboard(user_id: int, correct: int, options: list[int]):
 
 @router.chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
 async def on_member_join(event: ChatMemberUpdated, bot: Bot):
-    if not _is_allowed_chat(event.chat.id):
+    if not _is_group_chat(event.chat.id):
         return
 
     user = event.new_chat_member.user
@@ -224,7 +231,7 @@ async def _send_welcome(bot: Bot, chat_id: int, chat_title: str, user):
 
 @router.chat_member(ChatMemberUpdatedFilter(member_status_changed=LEAVE_TRANSITION))
 async def on_member_leave(event: ChatMemberUpdated, bot: Bot):
-    if not _is_allowed_chat(event.chat.id):
+    if not _is_group_chat(event.chat.id):
         return
     user = event.old_chat_member.user
     if user.is_bot:
@@ -245,7 +252,7 @@ async def on_member_leave(event: ChatMemberUpdated, bot: Bot):
 
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, bot: Bot):
-    if not _is_allowed_chat(message.chat.id):
+    if not _is_group_chat(message.chat.id):
         return
     member = await bot.get_chat_member(message.chat.id, message.from_user.id)
     if member.status not in ("creator", "administrator"):
@@ -271,7 +278,7 @@ async def cmd_rules(message: Message):
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, bot: Bot):
-    if not _is_allowed_chat(message.chat.id):
+    if not _is_group_chat(message.chat.id):
         return
     role = await _get_effective_role(bot, message.chat.id, message.from_user.id)
     if role == "member":
@@ -293,7 +300,7 @@ async def cmd_stats(message: Message, bot: Bot):
 # ---------------------------------------------------------------------------
 
 async def _require_admin_and_target(message: Message, bot: Bot):
-    if not _is_allowed_chat(message.chat.id):
+    if not _is_group_chat(message.chat.id):
         return None
     member = await bot.get_chat_member(message.chat.id, message.from_user.id)
     if member.status not in ("creator", "administrator"):
@@ -319,7 +326,7 @@ async def _get_effective_role(bot: Bot, chat_id: int, user_id: int) -> str:
 async def _require_moderator_and_target(message: Message, bot: Bot):
     """Как _require_admin_and_target, но пропускает также пользователей с кастомной ролью 'модератор'
     (может варнить/мутить/снимать мут, но не кикать/банить/менять настройки — см. раздел 3.7 ТЗ)."""
-    if not _is_allowed_chat(message.chat.id):
+    if not _is_group_chat(message.chat.id):
         return None
     role = await _get_effective_role(bot, message.chat.id, message.from_user.id)
     if role == "member":
@@ -396,7 +403,7 @@ async def cmd_unban(message: Message, bot: Bot):
 
 @router.message(Command("setflood"))
 async def cmd_setflood(message: Message, bot: Bot, command: CommandObject):
-    if not _is_allowed_chat(message.chat.id):
+    if not _is_group_chat(message.chat.id):
         return
     member = await bot.get_chat_member(message.chat.id, message.from_user.id)
     if member.status not in ("creator", "administrator"):
@@ -415,7 +422,7 @@ async def cmd_setflood(message: Message, bot: Bot, command: CommandObject):
 
 @router.message(Command("setwelcome"))
 async def cmd_setwelcome(message: Message, bot: Bot, command: CommandObject):
-    if not _is_allowed_chat(message.chat.id):
+    if not _is_group_chat(message.chat.id):
         return
     member = await bot.get_chat_member(message.chat.id, message.from_user.id)
     if member.status not in ("creator", "administrator"):
@@ -709,7 +716,7 @@ async def _process_engagement(bot: Bot, chat_id: int, user):
 
 @router.message(F.text | F.caption)
 async def on_message(message: Message, bot: Bot):
-    if not _is_allowed_chat(message.chat.id):
+    if not _is_group_chat(message.chat.id):
         return
     if message.from_user.is_bot:
         return

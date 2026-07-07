@@ -59,6 +59,32 @@ CREATE TABLE IF NOT EXISTS banned_words (
 CREATE TABLE IF NOT EXISTS ad_domains (
     domain TEXT PRIMARY KEY
 );
+
+CREATE TABLE IF NOT EXISTS roles (
+    user_id INTEGER PRIMARY KEY,
+    role TEXT NOT NULL,
+    granted_by INTEGER,
+    granted_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS reputation (
+    user_id INTEGER PRIMARY KEY,
+    score INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS reputation_votes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    voter_id INTEGER,
+    target_id INTEGER,
+    created_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS pending_captcha (
+    user_id INTEGER PRIMARY KEY,
+    join_message_id INTEGER,
+    correct_answer TEXT,
+    deadline INTEGER
+);
 """
 
 _conn: Optional[aiosqlite.Connection] = None
@@ -313,3 +339,131 @@ async def add_ad_domain(domain: str):
 async def remove_ad_domain(domain: str):
     await _conn.execute("DELETE FROM ad_domains WHERE domain = ?", (domain.lower(),))
     await _conn.commit()
+
+
+# ---------- ROLES (кастомная роль "модератор" поверх Telegram-прав) ----------
+
+async def grant_role(user_id: int, role: str, granted_by: int):
+    await _conn.execute(
+        "INSERT INTO roles (user_id, role, granted_by, granted_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET role = excluded.role, granted_by = excluded.granted_by, granted_at = excluded.granted_at",
+        (user_id, role, granted_by, int(time.time())),
+    )
+    await _conn.commit()
+
+
+async def revoke_role(user_id: int):
+    await _conn.execute("DELETE FROM roles WHERE user_id = ?", (user_id,))
+    await _conn.commit()
+
+
+async def get_role(user_id: int) -> Optional[str]:
+    async with _conn.execute("SELECT role FROM roles WHERE user_id = ?", (user_id,)) as cur:
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+
+async def list_roles(role: str = None):
+    _conn.row_factory = aiosqlite.Row
+    if role:
+        async with _conn.execute("SELECT * FROM roles WHERE role = ?", (role,)) as cur:
+            return await cur.fetchall()
+    async with _conn.execute("SELECT * FROM roles") as cur:
+        return await cur.fetchall()
+
+
+# ---------- REPUTATION ----------
+
+async def add_reputation(target_id: int, voter_id: int, cooldown_sec: int) -> tuple[bool, int]:
+    """Возвращает (успех, текущий_счёт). Если voter уже голосовал за target в течение cooldown — успех False."""
+    now = int(time.time())
+    async with _conn.execute(
+        "SELECT created_at FROM reputation_votes WHERE voter_id = ? AND target_id = ? ORDER BY created_at DESC LIMIT 1",
+        (voter_id, target_id),
+    ) as cur:
+        row = await cur.fetchone()
+    if row and now - row[0] < cooldown_sec:
+        score = await get_reputation(target_id)
+        return False, score
+
+    await _conn.execute(
+        "INSERT INTO reputation_votes (voter_id, target_id, created_at) VALUES (?, ?, ?)",
+        (voter_id, target_id, now),
+    )
+    await _conn.execute(
+        "INSERT INTO reputation (user_id, score) VALUES (?, 1) "
+        "ON CONFLICT(user_id) DO UPDATE SET score = score + 1",
+        (target_id,),
+    )
+    await _conn.commit()
+    return True, await get_reputation(target_id)
+
+
+async def get_reputation(user_id: int) -> int:
+    async with _conn.execute("SELECT score FROM reputation WHERE user_id = ?", (user_id,)) as cur:
+        row = await cur.fetchone()
+        return row[0] if row else 0
+
+
+async def top_reputation(limit: int = 10):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute(
+        "SELECT r.user_id, r.score, m.username, m.full_name FROM reputation r "
+        "LEFT JOIN members m ON m.user_id = r.user_id ORDER BY r.score DESC LIMIT ?",
+        (limit,),
+    ) as cur:
+        return await cur.fetchall()
+
+
+async def top_xp(limit: int = 10):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute(
+        "SELECT user_id, username, full_name, xp, level FROM members ORDER BY xp DESC LIMIT ?", (limit,)
+    ) as cur:
+        return await cur.fetchall()
+
+
+# ---------- CAPTCHA ----------
+
+async def add_pending_captcha(user_id: int, join_message_id: int, correct_answer: str, deadline: int):
+    await _conn.execute(
+        "INSERT INTO pending_captcha (user_id, join_message_id, correct_answer, deadline) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET join_message_id = excluded.join_message_id, "
+        "correct_answer = excluded.correct_answer, deadline = excluded.deadline",
+        (user_id, join_message_id, correct_answer, deadline),
+    )
+    await _conn.commit()
+
+
+async def get_pending_captcha(user_id: int):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute("SELECT * FROM pending_captcha WHERE user_id = ?", (user_id,)) as cur:
+        return await cur.fetchone()
+
+
+async def remove_pending_captcha(user_id: int):
+    await _conn.execute("DELETE FROM pending_captcha WHERE user_id = ?", (user_id,))
+    await _conn.commit()
+
+
+# ---------- STATS OVERVIEW ----------
+
+async def chat_overview() -> dict:
+    async with _conn.execute("SELECT COUNT(*) FROM members") as cur:
+        total_members = (await cur.fetchone())[0]
+    async with _conn.execute("SELECT COUNT(*) FROM members WHERE is_muted = 1") as cur:
+        muted = (await cur.fetchone())[0]
+    async with _conn.execute("SELECT COUNT(*) FROM members WHERE is_banned = 1") as cur:
+        banned = (await cur.fetchone())[0]
+    async with _conn.execute("SELECT COALESCE(SUM(message_count), 0) FROM members") as cur:
+        total_messages = (await cur.fetchone())[0]
+    day_ago = int(time.time()) - 86400
+    async with _conn.execute("SELECT COUNT(*) FROM logs WHERE action = 'verdict' AND ts > ?", (day_ago,)) as cur:
+        violations_24h = (await cur.fetchone())[0]
+    return {
+        "total_members": total_members,
+        "muted": muted,
+        "banned": banned,
+        "total_messages": total_messages,
+        "violations_24h": violations_24h,
+    }

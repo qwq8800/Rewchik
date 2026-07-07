@@ -104,6 +104,59 @@ async def check_antiad(text: str, message_entities_urls: list[str]) -> Verdict:
     return Verdict(False)
 
 
+async def check_anticaps(text: str) -> Verdict:
+    """Избыточный КАПС (раздел 4.2 расширенный антифлуд)."""
+    if not await db.get_bool_setting("anticaps_enabled") or not text:
+        return Verdict(False)
+
+    min_length = int(await db.get_setting("anticaps_min_length"))
+    ratio_threshold = float(await db.get_setting("anticaps_ratio"))
+
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < min_length:
+        return Verdict(False)
+
+    upper_count = sum(1 for c in letters if c.isupper())
+    ratio = upper_count / len(letters)
+    if ratio >= ratio_threshold:
+        return Verdict(True, "anticaps", severity=1, reason="Избыточный КАПС в сообщении.")
+    return Verdict(False)
+
+
+async def check_antimention(entities) -> Verdict:
+    """Массовые упоминания (mention-spam)."""
+    if not await db.get_bool_setting("antimention_enabled") or not entities:
+        return Verdict(False)
+
+    limit = int(await db.get_setting("antimention_limit"))
+    mention_count = sum(1 for ent in entities if ent.type in ("mention", "text_mention"))
+    if mention_count > limit:
+        return Verdict(
+            True, "antimention", severity=2,
+            reason=f"Слишком много упоминаний в одном сообщении ({mention_count} > {limit})."
+        )
+    return Verdict(False)
+
+
+async def check_antirepeat(text: str) -> Verdict:
+    """Повторяющиеся символы подряд ("ААААААА")."""
+    if not await db.get_bool_setting("antirepeat_enabled") or not text:
+        return Verdict(False)
+
+    min_length = int(await db.get_setting("antirepeat_min_length"))
+    run_char = None
+    run_len = 0
+    for c in text:
+        if c == run_char:
+            run_len += 1
+        else:
+            run_char = c
+            run_len = 1
+        if run_len >= min_length and c.isalnum():
+            return Verdict(True, "antirepeat", severity=1, reason="Повторяющиеся символы подряд.")
+    return Verdict(False)
+
+
 def strongest_verdict(verdicts: list[Verdict]) -> Verdict:
     """Если сработало несколько анти-модулей на одно сообщение — берём самый строгий (раздел 4.0 п.4)."""
     triggered = [v for v in verdicts if v.triggered]

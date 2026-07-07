@@ -10,6 +10,7 @@ from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery
 
 import db
+import config
 import keyboards
 import punishments
 
@@ -86,6 +87,45 @@ async def panel_router(callback: CallbackQuery, bot: Bot):
     elif section == "logs":
         offset = int(parts[2])
         await _show_logs(callback, offset)
+
+    elif section == "roles":
+        rows = await db.list_roles(config.ROLE_MODERATOR)
+        if not rows:
+            text = "🎭 <b>Роли</b>\n\nНазначенных модераторов пока нет."
+        else:
+            lines = ["🎭 <b>Модераторы чата</b>", ""]
+            for r in rows:
+                m = await db.get_member(r["user_id"])
+                name = (m["username"] or m["full_name"]) if m else str(r["user_id"])
+                lines.append(f"• @{name}")
+            text = "\n".join(lines)
+        text += "\n\nНазначить: ответьте на сообщение участника командой /promote в чате.\nСнять: /demote."
+        await callback.message.edit_text(text, reply_markup=keyboards.roles_menu())
+
+    elif section == "reputation":
+        rows = await db.top_reputation(10)
+        if not rows:
+            text = "⭐ <b>Репутация</b>\n\nПока никто не получил репутацию."
+        else:
+            lines = ["⭐ <b>Топ по репутации</b>", ""]
+            for i, r in enumerate(rows, 1):
+                name = r["username"] or r["full_name"] or r["user_id"]
+                lines.append(f"{i}. @{name} — {r['score']}")
+            text = "\n".join(lines)
+        text += "\n\nНачислить: ответить на сообщение участника командой /rep в чате."
+        await callback.message.edit_text(text, reply_markup=keyboards.back_only_menu())
+
+    elif section == "stats":
+        o = await db.chat_overview()
+        text = (
+            "📊 <b>Обзор чата @RewchikChat</b>\n\n"
+            f"👥 Участников в базе: {o['total_members']}\n"
+            f"🔇 Сейчас замучено: {o['muted']}\n"
+            f"🚫 Забанено: {o['banned']}\n"
+            f"💬 Всего сообщений учтено: {o['total_messages']}\n"
+            f"⚠️ Нарушений за 24 часа: {o['violations_24h']}"
+        )
+        await callback.message.edit_text(text, reply_markup=keyboards.back_only_menu())
 
     elif section == "settings":
         if len(parts) == 2:

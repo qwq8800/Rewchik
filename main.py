@@ -7,13 +7,16 @@
 """
 import asyncio
 import logging
+import random
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart, CommandObject
-from aiogram.types import Message, ChatMemberUpdated
-from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter, JOIN_TRANSITION
+from aiogram.types import Message, ChatMemberUpdated, CallbackQuery
+from aiogram.types import ChatPermissions
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter, JOIN_TRANSITION, LEAVE_TRANSITION
 
 import config
 import db
@@ -54,8 +57,43 @@ def _is_allowed_chat(chat_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Приветствие новых участников
+# Приветствие, капча для новичков и прощание
 # ---------------------------------------------------------------------------
+
+RESTRICTED_ON_JOIN = ChatPermissions(
+    can_send_messages=False,
+    can_send_audios=False,
+    can_send_documents=False,
+    can_send_photos=False,
+    can_send_videos=False,
+    can_send_video_notes=False,
+    can_send_voice_notes=False,
+    can_send_polls=False,
+    can_send_other_messages=False,
+    can_add_web_page_previews=False,
+)
+
+FULL_PERMISSIONS = ChatPermissions(
+    can_send_messages=True,
+    can_send_audios=True,
+    can_send_documents=True,
+    can_send_photos=True,
+    can_send_videos=True,
+    can_send_video_notes=True,
+    can_send_voice_notes=True,
+    can_send_polls=True,
+    can_send_other_messages=True,
+    can_add_web_page_previews=True,
+)
+
+
+def _captcha_keyboard(user_id: int, correct: int, options: list[int]):
+    b = InlineKeyboardBuilder()
+    for opt in options:
+        b.button(text=str(opt), callback_data=f"captcha:{user_id}:{opt}:{correct}")
+    b.adjust(len(options))
+    return b.as_markup()
+
 
 @router.chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
 async def on_member_join(event: ChatMemberUpdated, bot: Bot):
@@ -64,16 +102,127 @@ async def on_member_join(event: ChatMemberUpdated, bot: Bot):
 
     user = event.new_chat_member.user
     await db.ensure_member(user.id, user.username, user.full_name)
+    await db.add_log("join", user.id, None, "")
 
-    if await db.get_bool_setting("welcome_enabled"):
-        template = await db.get_setting("welcome_text")
+    if user.is_bot:
+        return
+
+    if not await db.get_bool_setting("captcha_enabled"):
+        await _send_welcome(bot, event.chat.id, event.chat.title, user)
+        return
+
+    # Ограничиваем новичка до прохождения капчи (простая проверка "не робот" через выбор числа)
+    try:
+        await bot.restrict_chat_member(event.chat.id, user.id, permissions=RESTRICTED_ON_JOIN)
+    except Exception as e:
+        logger.warning(f"Не удалось ограничить новичка {user.id} на время капчи: {e}")
+
+    a, b_ = random.randint(1, 9), random.randint(1, 9)
+    correct = a + b_
+    options = {correct}
+    while len(options) < 4:
+        options.add(random.randint(2, 18))
+    options = list(options)
+    random.shuffle(options)
+
+    timeout = int(await db.get_setting("captcha_timeout_sec"))
+    deadline = int(asyncio.get_event_loop().time()) + timeout
+
+    try:
+        sent = await bot.send_message(
+            event.chat.id,
+            f"🤖 {user.mention_html()}, подтвердите, что вы не робот.\n"
+            f"Сколько будет <b>{a} + {b_}</b>? У вас {timeout // 60} мин., иначе вы будете удалены из чата.",
+            reply_markup=_captcha_keyboard(user.id, correct, options),
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось отправить капчу: {e}")
+        return
+
+    await db.add_pending_captcha(user.id, sent.message_id, str(correct), deadline)
+    asyncio.create_task(_captcha_timeout_kick(bot, event.chat.id, user.id, sent.message_id, timeout))
+
+
+async def _captcha_timeout_kick(bot: Bot, chat_id: int, user_id: int, captcha_message_id: int, timeout: int):
+    await asyncio.sleep(timeout)
+    pending = await db.get_pending_captcha(user_id)
+    if pending is None:
+        return  # уже прошёл капчу
+    await db.remove_pending_captcha(user_id)
+    try:
+        await bot.delete_message(chat_id, captcha_message_id)
+    except Exception:
+        pass
+    try:
+        await bot.ban_chat_member(chat_id, user_id)
+        await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)  # кик, а не бан навсегда
+    except Exception as e:
+        logger.warning(f"Не удалось удалить не прошедшего капчу {user_id}: {e}")
+    await db.add_log("captcha_timeout_kick", user_id, None, "")
+
+
+@router.callback_query(F.data.startswith("captcha:"))
+async def on_captcha_answer(callback: CallbackQuery, bot: Bot):
+    _, target_user_id, chosen, correct = callback.data.split(":")
+    target_user_id, chosen, correct = int(target_user_id), int(chosen), int(correct)
+
+    if callback.from_user.id != target_user_id:
+        await callback.answer("Эта капча не для вас 🙂", show_alert=True)
+        return
+
+    pending = await db.get_pending_captcha(target_user_id)
+    if pending is None:
+        await callback.answer("Капча уже неактивна.", show_alert=True)
+        return
+
+    chat_id = callback.message.chat.id
+
+    if chosen != correct:
+        await callback.answer("❌ Неверно, попробуйте ещё раз или дождитесь новой капчи.", show_alert=True)
+        return
+
+    await db.remove_pending_captcha(target_user_id)
+    try:
+        await bot.restrict_chat_member(chat_id, target_user_id, permissions=FULL_PERMISSIONS)
+    except Exception as e:
+        logger.warning(f"Не удалось снять ограничение после капчи: {e}")
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    await db.add_log("captcha_passed", target_user_id, None, "")
+    await _send_welcome(bot, chat_id, callback.message.chat.title, callback.from_user)
+    await callback.answer("✅ Добро пожаловать!")
+
+
+async def _send_welcome(bot: Bot, chat_id: int, chat_title: str, user):
+    if not await db.get_bool_setting("welcome_enabled"):
+        return
+    template = await db.get_setting("welcome_text")
+    text = template.format(chat_title=chat_title or "чат", user_mention=user.mention_html())
+    try:
+        await bot.send_message(chat_id, text)
+    except Exception as e:
+        logger.warning(f"Не удалось отправить приветствие: {e}")
+
+
+@router.chat_member(ChatMemberUpdatedFilter(member_status_changed=LEAVE_TRANSITION))
+async def on_member_leave(event: ChatMemberUpdated, bot: Bot):
+    if not _is_allowed_chat(event.chat.id):
+        return
+    user = event.old_chat_member.user
+    if user.is_bot:
+        return
+    await db.add_log("leave", user.id, None, "")
+    if await db.get_bool_setting("farewell_enabled"):
+        template = await db.get_setting("farewell_text")
         text = template.format(chat_title=event.chat.title or "чат", user_mention=user.mention_html())
         try:
             await bot.send_message(event.chat.id, text)
         except Exception as e:
-            logger.warning(f"Не удалось отправить приветствие: {e}")
-
-    await db.add_log("join", user.id, None, "")
+            logger.warning(f"Не удалось отправить прощание: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +255,25 @@ async def cmd_rules(message: Message):
     await message.reply(text)
 
 
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, bot: Bot):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    role = await _get_effective_role(bot, message.chat.id, message.from_user.id)
+    if role == "member":
+        await message.reply("⛔ Статистика доступна администраторам и модераторам.")
+        return
+    o = await db.chat_overview()
+    await message.reply(
+        "📊 <b>Обзор чата @RewchikChat</b>\n\n"
+        f"👥 Участников в базе: {o['total_members']}\n"
+        f"🔇 Сейчас замучено: {o['muted']}\n"
+        f"🚫 Забанено: {o['banned']}\n"
+        f"💬 Всего сообщений учтено: {o['total_messages']}\n"
+        f"⚠️ Нарушений за 24 часа: {o['violations_24h']}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Ручные команды модерации (через reply на сообщение нарушителя)
 # ---------------------------------------------------------------------------
@@ -123,9 +291,35 @@ async def _require_admin_and_target(message: Message, bot: Bot):
     return message.reply_to_message.from_user
 
 
+async def _get_effective_role(bot: Bot, chat_id: int, user_id: int) -> str:
+    """admin — реальный Telegram-админ/создатель; moderator — кастомная роль из БД; member — все остальные."""
+    member = await bot.get_chat_member(chat_id, user_id)
+    if member.status in ("creator", "administrator"):
+        return "admin"
+    role = await db.get_role(user_id)
+    if role == config.ROLE_MODERATOR:
+        return "moderator"
+    return "member"
+
+
+async def _require_moderator_and_target(message: Message, bot: Bot):
+    """Как _require_admin_and_target, но пропускает также пользователей с кастомной ролью 'модератор'
+    (может варнить/мутить/снимать мут, но не кикать/банить/менять настройки — см. раздел 3.7 ТЗ)."""
+    if not _is_allowed_chat(message.chat.id):
+        return None
+    role = await _get_effective_role(bot, message.chat.id, message.from_user.id)
+    if role == "member":
+        await message.reply("⛔ Эта команда доступна администраторам и модераторам.")
+        return None
+    if not message.reply_to_message:
+        await message.reply("ℹ️ Ответьте этой командой на сообщение нужного участника.")
+        return None
+    return message.reply_to_message.from_user
+
+
 @router.message(Command("warn"))
 async def cmd_warn(message: Message, bot: Bot, command: CommandObject):
-    target = await _require_admin_and_target(message, bot)
+    target = await _require_moderator_and_target(message, bot)
     if not target:
         return
     reason = command.args or "без причины"
@@ -136,7 +330,7 @@ async def cmd_warn(message: Message, bot: Bot, command: CommandObject):
 
 @router.message(Command("mute"))
 async def cmd_mute(message: Message, bot: Bot, command: CommandObject):
-    target = await _require_admin_and_target(message, bot)
+    target = await _require_moderator_and_target(message, bot)
     if not target:
         return
     minutes = 30
@@ -152,7 +346,7 @@ async def cmd_mute(message: Message, bot: Bot, command: CommandObject):
 
 @router.message(Command("unmute"))
 async def cmd_unmute(message: Message, bot: Bot):
-    target = await _require_admin_and_target(message, bot)
+    target = await _require_moderator_and_target(message, bot)
     if not target:
         return
     await punishments.unmute_user(bot, message.chat.id, target.id)
@@ -227,10 +421,98 @@ async def cmd_rank(message: Message):
     if not m:
         await message.reply("Данных пока нет — напишите пару сообщений в чат.")
         return
+    rep = await db.get_reputation(message.from_user.id)
     await message.reply(
         f"📈 <b>{message.from_user.full_name}</b>\n"
-        f"Уровень: {m['level']}\nXP: {m['xp']}\nСообщений: {m['message_count']}\nВарнов: {m['warns_count']}"
+        f"Уровень: {m['level']}\nXP: {m['xp']}\nСообщений: {m['message_count']}\n"
+        f"Варнов: {m['warns_count']}\nРепутация: {rep}"
     )
+
+
+@router.message(Command("promote"))
+async def cmd_promote(message: Message, bot: Bot):
+    """Выдать кастомную роль 'модератор' (только настоящие админы/создатель)."""
+    target = await _require_admin_and_target(message, bot)
+    if not target:
+        return
+    await db.ensure_member(target.id, target.username, target.full_name)
+    await db.grant_role(target.id, config.ROLE_MODERATOR, message.from_user.id)
+    await db.add_log("promote", target.id, message.from_user.id, "role=moderator")
+    await message.reply(f"⭐ {target.mention_html()} назначен(а) модератором чата.")
+
+
+@router.message(Command("demote"))
+async def cmd_demote(message: Message, bot: Bot):
+    target = await _require_admin_and_target(message, bot)
+    if not target:
+        return
+    await db.revoke_role(target.id)
+    await db.add_log("demote", target.id, message.from_user.id, "")
+    await message.reply(f"➖ {target.mention_html()} больше не модератор.")
+
+
+@router.message(Command("mods"))
+async def cmd_mods(message: Message):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    rows = await db.list_roles(config.ROLE_MODERATOR)
+    if not rows:
+        await message.reply("Пока нет назначенных модераторов (кроме администраторов Telegram).")
+        return
+    lines = ["🎭 <b>Модераторы чата</b>", ""]
+    for r in rows:
+        m = await db.get_member(r["user_id"])
+        name = (m["username"] or m["full_name"]) if m else str(r["user_id"])
+        lines.append(f"• @{name}")
+    await message.reply("\n".join(lines))
+
+
+@router.message(Command("rep"))
+async def cmd_rep(message: Message):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    if not await db.get_bool_setting("reputation_enabled"):
+        await message.reply("Модуль репутации отключён.")
+        return
+    if not message.reply_to_message:
+        await message.reply("ℹ️ Ответьте командой /rep на сообщение участника, которому хотите начислить репутацию.")
+        return
+    target = message.reply_to_message.from_user
+    if target.id == message.from_user.id:
+        await message.reply("Нельзя начислить репутацию самому себе 🙂")
+        return
+    if target.is_bot:
+        await message.reply("Ботам репутация не начисляется.")
+        return
+
+    cooldown = int(await db.get_setting("reputation_cooldown_sec"))
+    await db.ensure_member(target.id, target.username, target.full_name)
+    success, score = await db.add_reputation(target.id, message.from_user.id, cooldown)
+    if not success:
+        await message.reply(f"⏳ Вы уже начисляли репутацию {target.mention_html()} недавно. Попробуйте позже.")
+        return
+    await message.reply(f"⭐ {target.mention_html()} получил(а) +1 к репутации! Теперь: {score}")
+
+
+@router.message(Command("top"))
+async def cmd_top(message: Message):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    xp_rows = await db.top_xp(10)
+    rep_rows = await db.top_reputation(10)
+
+    lines = ["📊 <b>Топ участников по активности (XP)</b>", ""]
+    for i, r in enumerate(xp_rows, 1):
+        name = r["username"] or r["full_name"] or r["user_id"]
+        lines.append(f"{i}. @{name} — уровень {r['level']}, {r['xp']} XP")
+
+    if rep_rows:
+        lines += ["", "⭐ <b>Топ по репутации</b>", ""]
+        for i, r in enumerate(rep_rows, 1):
+            name = r["username"] or r["full_name"] or r["user_id"]
+            lines.append(f"{i}. @{name} — {r['score']}")
+
+    await message.reply("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -244,14 +526,23 @@ async def on_message(message: Message, bot: Bot):
     if message.from_user.is_bot:
         return
 
-    member_status = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if member_status.status in ("creator", "administrator"):
-        # Админов не модерируем, но считаем сообщения/XP
-        await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    # Если у пользователя ожидает подтверждения капча — любое сообщение до её прохождения удаляем
+    pending_captcha = await db.get_pending_captcha(message.from_user.id)
+    if pending_captcha is not None:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    role = await _get_effective_role(bot, message.chat.id, message.from_user.id)
+    await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
+
+    if role in ("admin", "moderator"):
+        # Админов и модераторов не модерируем, но считаем сообщения/XP
         await db.bump_message_count(message.from_user.id)
         return
 
-    await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
     text = message.text or message.caption or ""
 
     urls = []
@@ -270,6 +561,9 @@ async def on_message(message: Message, bot: Bot):
         await moderation.check_antispam_duplicate(message.from_user.id, text, joined_at),
         await moderation.check_banned_words(text),
         await moderation.check_antiad(text, urls),
+        await moderation.check_anticaps(text),
+        await moderation.check_antimention(entities),
+        await moderation.check_antirepeat(text),
     ]
     final_verdict = moderation.strongest_verdict(verdicts)
 

@@ -13,9 +13,12 @@ def main_menu() -> InlineKeyboardMarkup:
     b.button(text="🚫 Модерация", callback_data="panel:moderation")
     b.button(text="📜 Логи", callback_data="panel:logs:0")
     b.button(text="👥 Пользователи", callback_data="panel:users")
+    b.button(text="🎭 Роли", callback_data="panel:roles")
+    b.button(text="⭐ Репутация", callback_data="panel:reputation")
+    b.button(text="📊 Статистика", callback_data="panel:stats")
     b.button(text="⚙️ Настройки", callback_data="panel:settings")
     b.button(text="❌ Закрыть", callback_data="panel:close")
-    b.adjust(2, 2, 1)
+    b.adjust(2, 2, 2, 2)
     return b.as_markup()
 
 
@@ -29,12 +32,16 @@ async def moderation_menu() -> InlineKeyboardMarkup:
     b.button(text=f"Антифлуд: {onoff('antiflood_enabled')}", callback_data="panel:mod:toggle:antiflood_enabled")
     b.button(text=f"Антиспам: {onoff('antispam_enabled')}", callback_data="panel:mod:toggle:antispam_enabled")
     b.button(text=f"Антиреклама: {onoff('antiad_enabled')}", callback_data="panel:mod:toggle:antiad_enabled")
+    b.button(text=f"Антикапс: {onoff('anticaps_enabled')}", callback_data="panel:mod:toggle:anticaps_enabled")
+    b.button(text=f"Антиупоминания: {onoff('antimention_enabled')}", callback_data="panel:mod:toggle:antimention_enabled")
+    b.button(text=f"Антиповторы: {onoff('antirepeat_enabled')}", callback_data="panel:mod:toggle:antirepeat_enabled")
+    b.button(text=f"Капча новичкам: {onoff('captcha_enabled')}", callback_data="panel:mod:toggle:captcha_enabled")
     b.button(
         text=f"Порог флуда: {settings.get('antiflood_limit')} msg / {settings.get('antiflood_window_sec')}s",
         callback_data="panel:mod:info:antiflood",
     )
     b.button(text="🔙 Назад", callback_data="panel:main")
-    b.adjust(1, 1, 1, 1, 1)
+    b.adjust(1)
     return b.as_markup()
 
 
@@ -44,6 +51,18 @@ def users_menu() -> InlineKeyboardMarkup:
     b.button(text="🚫 Забаненные", callback_data="panel:users:banned:0")
     b.button(text="🔙 Назад", callback_data="panel:main")
     b.adjust(2, 1)
+    return b.as_markup()
+
+
+def back_only_menu(target: str = "panel:main") -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🔙 Назад", callback_data=target)
+    return b.as_markup()
+
+
+def roles_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🔙 Назад", callback_data="panel:main")
     return b.as_markup()
 
 

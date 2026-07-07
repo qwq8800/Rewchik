@@ -12,7 +12,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
 
 # --- Единственный разрешённый чат ---
-ALLOWED_CHAT_ID = -1004458436938
+ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID", "-1004458436938"))
 ALLOWED_CHAT_USERNAME = "RewchikChat"
 
 # --- База данных ---

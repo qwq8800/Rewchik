@@ -1,0 +1,104 @@
+"""
+Клавиатуры кнопочной админ-панели (/settings).
+Каждая настройка отображает текущее значение прямо в кнопке (принцип "Предсказуемость", п.0.3 ТЗ).
+"""
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+import db
+
+
+def main_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🚫 Модерация", callback_data="panel:moderation")
+    b.button(text="📜 Логи", callback_data="panel:logs:0")
+    b.button(text="👥 Пользователи", callback_data="panel:users")
+    b.button(text="⚙️ Настройки", callback_data="panel:settings")
+    b.button(text="❌ Закрыть", callback_data="panel:close")
+    b.adjust(2, 2, 1)
+    return b.as_markup()
+
+
+async def moderation_menu() -> InlineKeyboardMarkup:
+    settings = await db.get_all_settings()
+    b = InlineKeyboardBuilder()
+
+    def onoff(key):
+        return "✅ Вкл" if settings.get(key) == "1" else "⛔ Выкл"
+
+    b.button(text=f"Антифлуд: {onoff('antiflood_enabled')}", callback_data="panel:mod:toggle:antiflood_enabled")
+    b.button(text=f"Антиспам: {onoff('antispam_enabled')}", callback_data="panel:mod:toggle:antispam_enabled")
+    b.button(text=f"Антиреклама: {onoff('antiad_enabled')}", callback_data="panel:mod:toggle:antiad_enabled")
+    b.button(
+        text=f"Порог флуда: {settings.get('antiflood_limit')} msg / {settings.get('antiflood_window_sec')}s",
+        callback_data="panel:mod:info:antiflood",
+    )
+    b.button(text="🔙 Назад", callback_data="panel:main")
+    b.adjust(1, 1, 1, 1, 1)
+    return b.as_markup()
+
+
+def users_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🔇 Замученные", callback_data="panel:users:muted:0")
+    b.button(text="🚫 Забаненные", callback_data="panel:users:banned:0")
+    b.button(text="🔙 Назад", callback_data="panel:main")
+    b.adjust(2, 1)
+    return b.as_markup()
+
+
+def paginated_user_list(rows, kind: str, offset: int, total: int, limit: int = 8) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for row in rows:
+        name = row["username"] or row["full_name"] or str(row["user_id"])
+        action = "unmute" if kind == "muted" else "unban"
+        label = f"↩️ Снять с @{name}" if kind == "muted" else f"↩️ Разбанить @{name}"
+        b.button(text=label, callback_data=f"panel:{action}:{row['user_id']}")
+    b.adjust(1)
+
+    nav_row = []
+    if offset > 0:
+        nav_row.append(
+            InlineKeyboardButton(text="◀️ Пред.", callback_data=f"panel:users:{kind}:{max(0, offset - limit)}")
+        )
+    if offset + limit < total:
+        nav_row.append(
+            InlineKeyboardButton(text="След. ▶️", callback_data=f"panel:users:{kind}:{offset + limit}")
+        )
+    if nav_row:
+        b.row(*nav_row)
+
+    b.row(InlineKeyboardButton(text="🔙 Назад", callback_data="panel:users"))
+    return b.as_markup()
+
+
+def logs_list(offset: int, total: int, limit: int = 10) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    nav_row = []
+    if offset > 0:
+        nav_row.append(InlineKeyboardButton(text="◀️ Пред.", callback_data=f"panel:logs:{max(0, offset - limit)}"))
+    if offset + limit < total:
+        nav_row.append(InlineKeyboardButton(text="След. ▶️", callback_data=f"panel:logs:{offset + limit}"))
+    if nav_row:
+        b.row(*nav_row)
+    b.row(InlineKeyboardButton(text="🔙 Назад", callback_data="panel:main"))
+    return b.as_markup()
+
+
+async def settings_menu() -> InlineKeyboardMarkup:
+    settings = await db.get_all_settings()
+    onoff = "✅ Вкл" if settings.get("welcome_enabled") == "1" else "⛔ Выкл"
+    b = InlineKeyboardBuilder()
+    b.button(text=f"Приветствие новичков: {onoff}", callback_data="panel:settings:toggle:welcome_enabled")
+    b.button(text="✏️ Изменить текст приветствия", callback_data="panel:settings:edit_welcome")
+    b.button(text="🔙 Назад", callback_data="panel:main")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def confirm_keyboard(action: str, target: str) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Да", callback_data=f"panel:confirm:{action}:{target}")
+    b.button(text="❌ Отмена", callback_data="panel:main")
+    b.adjust(2)
+    return b.as_markup()

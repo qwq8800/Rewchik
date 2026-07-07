@@ -35,6 +35,19 @@ router = Router(name="main")
 # Ограничение бота одним чатом
 # ---------------------------------------------------------------------------
 
+
+@router.message(CommandStart())
+async def cmd_start(message: Message):
+    await message.answer(
+        "👋 Привет! Я бот чата @RewchikChat.\n\n"
+        "📋 Мои команды:\n"
+        "/rules — правила чата\n"
+        "/rank — твой уровень и статистика\n"
+        "/top — топ участников\n"
+        "/rep — дать репутацию (ответом на сообщение)\n\n"
+        "Остальные функции работают в группе @RewchikChat."
+    )
+
 @router.my_chat_member()
 async def on_bot_added_to_chat(event: ChatMemberUpdated, bot: Bot):
     """Если бота куда-то добавили — проверяем chat_id и выходим, если это не наш чат."""
@@ -53,7 +66,8 @@ async def on_bot_added_to_chat(event: ChatMemberUpdated, bot: Bot):
 
 
 def _is_allowed_chat(chat_id: int) -> bool:
-    return chat_id == config.ALLOWED_CHAT_ID
+    # Личные сообщения (chat_id > 0) всегда разрешены
+    return chat_id > 0 or chat_id == config.ALLOWED_CHAT_ID
 
 
 # ---------------------------------------------------------------------------

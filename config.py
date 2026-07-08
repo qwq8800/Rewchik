@@ -77,9 +77,24 @@ DEFAULT_AD_DOMAINS = [
     "bit.ly",
 ]
 
-# Кастомные роли чата (раздел "Роли" ТЗ, упрощённая версия: одна выдаваемая роль
-# поверх стандартных прав Telegram creator/administrator).
+# Кастомные роли чата (раздел "Роли" ТЗ): администратор выдаёт роль с определённым
+# набором прав из фиксированного словаря PERMISSIONS. Не путать с реальными правами
+# Telegram (creator/administrator) — это дополнительный уровень поверх них.
 ROLE_MODERATOR = "moderator"
+
+PERMISSIONS = {
+    "moderate": "Варнить/мутить/снимать мут (/warn, /mute, /unmute)",
+    "kick_ban": "Кикать/банить (/kick, /ban, /unban)",
+    "manage_settings": "Менять настройки чата (/settings, /setflood, стоп-слова, домены)",
+    "view_stats": "Смотреть статистику чата (/stats)",
+    "manage_reports": "Обрабатывать жалобы (/report — кнопки мут/бан/отклонить)",
+}
+
+# Роли по умолчанию: (role_key, title, permissions_csv)
+DEFAULT_CUSTOM_ROLES = [
+    ("moderator", "Модератор", "moderate,view_stats,manage_reports"),
+]
+
 
 # Достижения по умолчанию (раздел "Достижения" ТЗ).
 # type: "messages" | "level" | "reputation"

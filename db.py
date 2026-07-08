@@ -67,6 +67,14 @@ CREATE TABLE IF NOT EXISTS roles (
     granted_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS custom_roles (
+    role_key TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    permissions TEXT NOT NULL,
+    created_by INTEGER,
+    created_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS reputation (
     user_id INTEGER PRIMARY KEY,
     score INTEGER DEFAULT 0
@@ -178,6 +186,13 @@ async def init_db():
         await _conn.execute(
             "INSERT OR IGNORE INTO shop_items (key, title, description, price, active) VALUES (?, ?, ?, ?, 1)",
             (key, title, desc, price),
+        )
+
+    for role_key, title, permissions in config.DEFAULT_CUSTOM_ROLES:
+        await _conn.execute(
+            "INSERT OR IGNORE INTO custom_roles (role_key, title, permissions, created_by, created_at) "
+            "VALUES (?, ?, ?, NULL, ?)",
+            (role_key, title, permissions, int(time.time())),
         )
 
     await _conn.commit()
@@ -453,6 +468,52 @@ async def list_roles(role: str = None):
             return await cur.fetchall()
     async with _conn.execute("SELECT * FROM roles") as cur:
         return await cur.fetchall()
+
+
+# ---------- CUSTOM ROLES (гибкие права поверх фиксированной роли-ярлыка) ----------
+
+async def create_custom_role(role_key: str, title: str, permissions_csv: str, created_by: int):
+    await _conn.execute(
+        "INSERT INTO custom_roles (role_key, title, permissions, created_by, created_at) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(role_key) DO UPDATE SET title = excluded.title, permissions = excluded.permissions",
+        (role_key, title, permissions_csv, created_by, int(time.time())),
+    )
+    await _conn.commit()
+
+
+async def get_custom_role(role_key: str):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute("SELECT * FROM custom_roles WHERE role_key = ?", (role_key,)) as cur:
+        return await cur.fetchone()
+
+
+async def list_custom_roles():
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute("SELECT * FROM custom_roles ORDER BY role_key") as cur:
+        return await cur.fetchall()
+
+
+async def delete_custom_role(role_key: str):
+    await _conn.execute("DELETE FROM custom_roles WHERE role_key = ?", (role_key,))
+    await _conn.execute("DELETE FROM roles WHERE role = ?", (role_key,))
+    await _conn.commit()
+
+
+async def get_role_permissions(role_key: str) -> list:
+    role = await get_custom_role(role_key)
+    if role is None:
+        return []
+    return [p.strip() for p in role["permissions"].split(",") if p.strip()]
+
+
+async def user_has_permission(user_id: int, permission: str) -> bool:
+    """Проверяет право пользователя по назначенной кастомной роли (НЕ учитывает
+    Telegram creator/administrator — это отдельная, более высокая проверка на уровне main.py)."""
+    role_key = await get_role(user_id)
+    if role_key is None:
+        return False
+    perms = await get_role_permissions(role_key)
+    return permission in perms
 
 
 # ---------- REPUTATION ----------

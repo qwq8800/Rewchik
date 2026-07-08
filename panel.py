@@ -28,8 +28,7 @@ async def _is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
 async def _is_moderator_or_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     if await _is_admin(bot, chat_id, user_id):
         return True
-    role = await db.get_role(user_id)
-    return role == config.ROLE_MODERATOR
+    return await db.user_has_permission(user_id, "manage_reports")
 
 
 @router.callback_query(F.data.startswith("panel:"))

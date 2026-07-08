@@ -281,9 +281,8 @@ async def cmd_rules(message: Message):
 async def cmd_stats(message: Message, bot: Bot):
     if not _is_group_chat(message.chat.id):
         return
-    role = await _get_effective_role(bot, message.chat.id, message.from_user.id)
-    if role == "member":
-        await message.reply("⛔ Статистика доступна администраторам и модераторам.")
+    if not await _has_permission(bot, message.chat.id, message.from_user.id, "view_stats"):
+        await message.reply("⛔ Статистика доступна администраторам и ролям с правом «Смотреть статистику».")
         return
     o = await db.chat_overview()
     await message.reply(
@@ -366,24 +365,32 @@ async def _require_admin_and_target(message: Message, bot: Bot):
 
 
 async def _get_effective_role(bot: Bot, chat_id: int, user_id: int) -> str:
-    """admin — реальный Telegram-админ/создатель; moderator — кастомная роль из БД; member — все остальные."""
+    """admin — реальный Telegram-админ/создатель; moderator — назначена любая кастомная роль; member — все остальные.
+    Для точечной проверки конкретных прав используйте _has_permission()."""
     member = await bot.get_chat_member(chat_id, user_id)
     if member.status in ("creator", "administrator"):
         return "admin"
     role = await db.get_role(user_id)
-    if role == config.ROLE_MODERATOR:
+    if role:
         return "moderator"
     return "member"
 
 
-async def _require_moderator_and_target(message: Message, bot: Bot):
-    """Как _require_admin_and_target, но пропускает также пользователей с кастомной ролью 'модератор'
-    (может варнить/мутить/снимать мут, но не кикать/банить/менять настройки — см. раздел 3.7 ТЗ)."""
+async def _has_permission(bot: Bot, chat_id: int, user_id: int, permission: str) -> bool:
+    """Реальные Telegram-админы/создатель имеют все права всегда. Остальные — только то,
+    что явно указано в permissions их назначенной кастомной роли (раздел «Роли» ТЗ)."""
+    member = await bot.get_chat_member(chat_id, user_id)
+    if member.status in ("creator", "administrator"):
+        return True
+    return await db.user_has_permission(user_id, permission)
+
+
+async def _require_permission_and_target(message: Message, bot: Bot, permission: str):
+    """Как _require_admin_and_target, но пропускает любого, у чьей роли есть указанное право."""
     if not _is_group_chat(message.chat.id):
         return None
-    role = await _get_effective_role(bot, message.chat.id, message.from_user.id)
-    if role == "member":
-        await message.reply("⛔ Эта команда доступна администраторам и модераторам.")
+    if not await _has_permission(bot, message.chat.id, message.from_user.id, permission):
+        await message.reply(f"⛔ Для этой команды нужно право «{config.PERMISSIONS.get(permission, permission)}».")
         return None
     if not message.reply_to_message:
         await message.reply("ℹ️ Ответьте этой командой на сообщение нужного участника.")
@@ -391,9 +398,19 @@ async def _require_moderator_and_target(message: Message, bot: Bot):
     return message.reply_to_message.from_user
 
 
+async def _require_permission(message: Message, bot: Bot, permission: str) -> bool:
+    """Проверка права без цели (для команд настройки чата)."""
+    if not _is_group_chat(message.chat.id):
+        return False
+    if not await _has_permission(bot, message.chat.id, message.from_user.id, permission):
+        await message.reply(f"⛔ Для этой команды нужно право «{config.PERMISSIONS.get(permission, permission)}».")
+        return False
+    return True
+
+
 @router.message(Command("warn"))
 async def cmd_warn(message: Message, bot: Bot, command: CommandObject):
-    target = await _require_moderator_and_target(message, bot)
+    target = await _require_permission_and_target(message, bot, "moderate")
     if not target:
         return
     reason = command.args or "без причины"
@@ -404,7 +421,7 @@ async def cmd_warn(message: Message, bot: Bot, command: CommandObject):
 
 @router.message(Command("mute"))
 async def cmd_mute(message: Message, bot: Bot, command: CommandObject):
-    target = await _require_moderator_and_target(message, bot)
+    target = await _require_permission_and_target(message, bot, "moderate")
     if not target:
         return
     minutes = 30
@@ -420,7 +437,7 @@ async def cmd_mute(message: Message, bot: Bot, command: CommandObject):
 
 @router.message(Command("unmute"))
 async def cmd_unmute(message: Message, bot: Bot):
-    target = await _require_moderator_and_target(message, bot)
+    target = await _require_permission_and_target(message, bot, "moderate")
     if not target:
         return
     await punishments.unmute_user(bot, message.chat.id, target.id)
@@ -429,7 +446,7 @@ async def cmd_unmute(message: Message, bot: Bot):
 
 @router.message(Command("kick"))
 async def cmd_kick(message: Message, bot: Bot, command: CommandObject):
-    target = await _require_admin_and_target(message, bot)
+    target = await _require_permission_and_target(message, bot, "kick_ban")
     if not target:
         return
     await punishments.kick_user(bot, message.chat.id, target.id, command.args or "", message.from_user.id)
@@ -438,7 +455,7 @@ async def cmd_kick(message: Message, bot: Bot, command: CommandObject):
 
 @router.message(Command("ban"))
 async def cmd_ban(message: Message, bot: Bot, command: CommandObject):
-    target = await _require_admin_and_target(message, bot)
+    target = await _require_permission_and_target(message, bot, "kick_ban")
     if not target:
         return
     await punishments.ban_user(bot, message.chat.id, target.id, command.args or "", message.from_user.id)
@@ -447,7 +464,7 @@ async def cmd_ban(message: Message, bot: Bot, command: CommandObject):
 
 @router.message(Command("unban"))
 async def cmd_unban(message: Message, bot: Bot):
-    target = await _require_admin_and_target(message, bot)
+    target = await _require_permission_and_target(message, bot, "kick_ban")
     if not target:
         return
     await punishments.unban_user(bot, message.chat.id, target.id, message.from_user.id)
@@ -456,10 +473,7 @@ async def cmd_unban(message: Message, bot: Bot):
 
 @router.message(Command("setflood"))
 async def cmd_setflood(message: Message, bot: Bot, command: CommandObject):
-    if not _is_group_chat(message.chat.id):
-        return
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if member.status not in ("creator", "administrator"):
+    if not await _require_permission(message, bot, "manage_settings"):
         return
     if not command.args:
         await message.reply("Использование: /setflood <лимит> <окно_сек>")
@@ -475,10 +489,7 @@ async def cmd_setflood(message: Message, bot: Bot, command: CommandObject):
 
 @router.message(Command("setwelcome"))
 async def cmd_setwelcome(message: Message, bot: Bot, command: CommandObject):
-    if not _is_group_chat(message.chat.id):
-        return
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if member.status not in ("creator", "administrator"):
+    if not await _require_permission(message, bot, "manage_settings"):
         return
     if not command.args:
         await message.reply("Использование: /setwelcome <текст с {chat_title} и {user_mention}>")
@@ -488,13 +499,9 @@ async def cmd_setwelcome(message: Message, bot: Bot, command: CommandObject):
 
 
 async def _require_admin(message: Message, bot: Bot) -> bool:
-    if not _is_group_chat(message.chat.id):
-        return False
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if member.status not in ("creator", "administrator"):
-        await message.reply("⛔ Эта команда доступна только администраторам.")
-        return False
-    return True
+    """Используется командами управления стоп-словами/доменами/сроком варнов —
+    пропускает реальных админов и любую роль с правом manage_settings."""
+    return await _require_permission(message, bot, "manage_settings")
 
 
 @router.message(Command("addword"))
@@ -649,6 +656,102 @@ async def cmd_mods(message: Message):
         name = (m["username"] or m["full_name"]) if m else str(r["user_id"])
         lines.append(f"• @{name}")
     await message.reply("\n".join(lines))
+
+
+@router.message(Command("createrole"))
+async def cmd_createrole(message: Message, bot: Bot, command: CommandObject):
+    """Создать/обновить кастомную роль с произвольным набором прав (только реальные админы).
+    Использование: /createrole <ключ> <название>; <право1,право2,...>"""
+    if not _is_group_chat(message.chat.id):
+        return
+    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    if member.status not in ("creator", "administrator"):
+        await message.reply("⛔ Эта команда доступна только администраторам.")
+        return
+    if not command.args or ";" not in command.args:
+        perms_list = "\n".join(f"• <code>{k}</code> — {v}" for k, v in config.PERMISSIONS.items())
+        await message.reply(
+            "Использование: /createrole <ключ> <название>; <право1,право2,...>\n"
+            "Например: /createrole senior Старший модератор; moderate,kick_ban,view_stats\n\n"
+            f"Доступные права:\n{perms_list}"
+        )
+        return
+
+    head, perms_part = command.args.split(";", 1)
+    head_parts = head.strip().split(maxsplit=1)
+    if len(head_parts) < 2:
+        await message.reply("Нужно указать и ключ, и название роли. См. /createrole без аргументов для примера.")
+        return
+    role_key, title = head_parts[0].strip(), head_parts[1].strip()
+    requested_perms = [p.strip() for p in perms_part.split(",") if p.strip()]
+    unknown = [p for p in requested_perms if p not in config.PERMISSIONS]
+    if unknown:
+        await message.reply(f"Неизвестные права: {', '.join(unknown)}. См. /createrole без аргументов.")
+        return
+
+    await db.create_custom_role(role_key, title, ",".join(requested_perms), message.from_user.id)
+    await db.add_log("createrole", message.from_user.id, message.from_user.id, f"{role_key}:{','.join(requested_perms)}")
+    await message.reply(f"✅ Роль «{title}» (<code>{role_key}</code>) создана с правами: {', '.join(requested_perms) or '—'}")
+
+
+@router.message(Command("roles"))
+async def cmd_roles(message: Message):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    roles = await db.list_custom_roles()
+    if not roles:
+        await message.reply("Кастомные роли не определены.")
+        return
+    lines = ["🎭 <b>Роли чата</b>", ""]
+    for r in roles:
+        lines.append(f"<code>{r['role_key']}</code> — {r['title']}\nПрава: {r['permissions']}")
+    await message.reply("\n\n".join(lines))
+
+
+@router.message(Command("setrole"))
+async def cmd_setrole(message: Message, bot: Bot, command: CommandObject):
+    """Назначить участнику любую из созданных кастомных ролей (только реальные админы)."""
+    if not _is_group_chat(message.chat.id):
+        return
+    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    if member.status not in ("creator", "administrator"):
+        await message.reply("⛔ Эта команда доступна только администраторам.")
+        return
+    if not message.reply_to_message:
+        await message.reply("ℹ️ Ответьте этой командой на сообщение нужного участника.")
+        return
+    if not command.args:
+        await message.reply("Использование: /setrole <ключ_роли> (ответом на сообщение участника). Список: /roles")
+        return
+
+    role_key = command.args.split()[0].strip()
+    role = await db.get_custom_role(role_key)
+    if role is None:
+        await message.reply(f"Роль «{role_key}» не найдена. Сначала создайте её: /createrole. Список: /roles")
+        return
+
+    target = message.reply_to_message.from_user
+    await db.ensure_member(target.id, target.username, target.full_name)
+    await db.grant_role(target.id, role_key, message.from_user.id)
+    await db.add_log("setrole", target.id, message.from_user.id, role_key)
+    await message.reply(f"✅ {target.mention_html()} назначен(а) роль «{role['title']}».")
+
+
+@router.message(Command("removerole"))
+async def cmd_removerole(message: Message, bot: Bot):
+    if not _is_group_chat(message.chat.id):
+        return
+    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    if member.status not in ("creator", "administrator"):
+        await message.reply("⛔ Эта команда доступна только администраторам.")
+        return
+    if not message.reply_to_message:
+        await message.reply("ℹ️ Ответьте этой командой на сообщение нужного участника.")
+        return
+    target = message.reply_to_message.from_user
+    await db.revoke_role(target.id)
+    await db.add_log("removerole", target.id, message.from_user.id, "")
+    await message.reply(f"➖ Роль снята с {target.mention_html()}.")
 
 
 @router.message(Command("rep"))

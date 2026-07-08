@@ -6,6 +6,7 @@
 (middleware RestrictToSingleChat ниже перехватывает это до любых других обработчиков).
 """
 import asyncio
+import html
 import logging
 import random
 import time
@@ -30,6 +31,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("rewchik_bot")
 
 router = Router(name="main")
+
+# Ожидающие подтверждения смены имени: user_id -> предложенный никнейм.
+# Простое хранилище в памяти процесса достаточно — подтверждение происходит
+# в течение той же сессии, а не через рестарты (в отличие от мутов/капчи).
+_pending_nicknames: dict[int, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +159,7 @@ async def on_member_join(event: ChatMemberUpdated, bot: Bot):
     try:
         sent = await bot.send_message(
             event.chat.id,
-            f"🤖 {user.mention_html()}, подтвердите, что вы не робот.\n"
+            f"🤖 {await display_mention(user)}, подтвердите, что вы не робот.\n"
             f"Сколько будет <b>{a} + {b_}</b>? У вас {timeout // 60} мин., иначе вы будете удалены из чата.",
             reply_markup=_captcha_keyboard(user.id, correct, options),
         )
@@ -223,7 +229,7 @@ async def _send_welcome(bot: Bot, chat_id: int, chat_title: str, user):
     if not await db.get_bool_setting("welcome_enabled"):
         return
     template = await db.get_setting("welcome_text")
-    text = template.format(chat_title=chat_title or "чат", user_mention=user.mention_html())
+    text = template.format(chat_title=chat_title or "чат", user_mention=await display_mention(user))
     try:
         await bot.send_message(chat_id, text)
     except Exception as e:
@@ -240,7 +246,7 @@ async def on_member_leave(event: ChatMemberUpdated, bot: Bot):
     await db.add_log("leave", user.id, None, "")
     if await db.get_bool_setting("farewell_enabled"):
         template = await db.get_setting("farewell_text")
-        text = template.format(chat_title=event.chat.title or "чат", user_mention=user.mention_html())
+        text = template.format(chat_title=event.chat.title or "чат", user_mention=await display_mention(user))
         try:
             await bot.send_message(event.chat.id, text)
         except Exception as e:
@@ -337,8 +343,8 @@ async def cmd_report(message: Message, bot: Bot, command: CommandObject):
         await bot.send_message(
             message.chat.id,
             f"📨 <b>Новая жалоба #{report_id}</b>\n"
-            f"От: {message.from_user.mention_html()}\n"
-            f"На: {target.mention_html()}\n"
+            f"От: {await display_mention(message.from_user)}\n"
+            f"На: {await display_mention(target)}\n"
             f"Причина: {reason}\n"
             f"Сообщение: <i>{snippet}</i>",
             reply_markup=keyboards.report_action_keyboard(report_id),
@@ -362,6 +368,16 @@ async def _require_admin_and_target(message: Message, bot: Bot):
         await message.reply("ℹ️ Ответьте этой командой на сообщение нужного участника.")
         return None
     return message.reply_to_message.from_user
+
+
+async def display_mention(user) -> str:
+    """HTML-упоминание пользователя для сообщений бота в чате: если участник задал себе
+    кастомное отображаемое имя (/setname), используем его вместо имени из профиля Telegram —
+    но ссылка на tg://user всё равно тегает настоящего человека, как обычное упоминание."""
+    nickname = await db.get_nickname(user.id)
+    if nickname:
+        return f'<a href="tg://user?id={user.id}">{html.escape(nickname)}</a>'
+    return user.mention_html()
 
 
 async def _get_effective_role(bot: Bot, chat_id: int, user_id: int) -> str:
@@ -416,7 +432,7 @@ async def cmd_warn(message: Message, bot: Bot, command: CommandObject):
     reason = command.args or "без причины"
     await db.ensure_member(target.id, target.username, target.full_name)
     action, extra = await punishments.apply_verdict(bot, message.chat.id, target.id, "manual", reason, message.from_user.id)
-    await message.reply(f"⚠️ Пользователю {target.mention_html()} вынесено предупреждение.\nПричина: {reason}")
+    await message.reply(f"⚠️ Пользователю {await display_mention(target)} вынесено предупреждение.\nПричина: {reason}")
 
 
 @router.message(Command("mute"))
@@ -432,7 +448,7 @@ async def cmd_mute(message: Message, bot: Bot, command: CommandObject):
             pass
     await db.ensure_member(target.id, target.username, target.full_name)
     await punishments.mute_user(bot, message.chat.id, target.id, minutes * 60, "manual")
-    await message.reply(f"🔇 {target.mention_html()} замучен на {minutes} мин.")
+    await message.reply(f"🔇 {await display_mention(target)} замучен на {minutes} мин.")
 
 
 @router.message(Command("unmute"))
@@ -441,7 +457,7 @@ async def cmd_unmute(message: Message, bot: Bot):
     if not target:
         return
     await punishments.unmute_user(bot, message.chat.id, target.id)
-    await message.reply(f"🔊 С {target.mention_html()} снят мут.")
+    await message.reply(f"🔊 С {await display_mention(target)} снят мут.")
 
 
 @router.message(Command("kick"))
@@ -450,7 +466,7 @@ async def cmd_kick(message: Message, bot: Bot, command: CommandObject):
     if not target:
         return
     await punishments.kick_user(bot, message.chat.id, target.id, command.args or "", message.from_user.id)
-    await message.reply(f"👢 {target.mention_html()} удалён из чата.")
+    await message.reply(f"👢 {await display_mention(target)} удалён из чата.")
 
 
 @router.message(Command("ban"))
@@ -459,7 +475,7 @@ async def cmd_ban(message: Message, bot: Bot, command: CommandObject):
     if not target:
         return
     await punishments.ban_user(bot, message.chat.id, target.id, command.args or "", message.from_user.id)
-    await message.reply(f"🚫 {target.mention_html()} забанен.")
+    await message.reply(f"🚫 {await display_mention(target)} забанен.")
 
 
 @router.message(Command("unban"))
@@ -468,7 +484,7 @@ async def cmd_unban(message: Message, bot: Bot):
     if not target:
         return
     await punishments.unban_user(bot, message.chat.id, target.id, message.from_user.id)
-    await message.reply(f"✅ {target.mention_html()} разбанен.")
+    await message.reply(f"✅ {await display_mention(target)} разбанен.")
 
 
 @router.message(Command("setflood"))
@@ -595,6 +611,89 @@ async def cmd_setwarnexpiry(message: Message, bot: Bot, command: CommandObject):
     await message.reply(f"✅ Предупреждения теперь действуют {days} дней.")
 
 
+@router.message(Command("setname"))
+async def cmd_setname(message: Message, command: CommandObject):
+    """Позволяет обычному участнику задать имя, которое бот будет использовать
+    при упоминаниях в чате (варны, приветствие, левелап и т.д.) вместо имени профиля Telegram.
+    Меняется не чаще раза в 2 суток и требует подтверждения кнопкой."""
+    if not _is_allowed_chat(message.chat.id):
+        return
+
+    cooldown = int(await db.get_setting("nickname_change_cooldown_sec"))
+    min_len = int(await db.get_setting("nickname_min_length"))
+    max_len = int(await db.get_setting("nickname_max_length"))
+
+    if not command.args:
+        current = await db.get_nickname(message.from_user.id)
+        current_line = f"Сейчас: «{current}»" if current else "Сейчас используется имя из профиля Telegram."
+        days = cooldown // 86400
+        await message.reply(
+            f"Использование: /setname <новое имя>\n{current_line}\n"
+            f"Длина: {min_len}–{max_len} символов. Менять можно не чаще раза в {days} дня(ей)."
+        )
+        return
+
+    new_name = " ".join(command.args.split())  # схлопнуть лишние пробелы/переносы строк
+
+    if not (min_len <= len(new_name) <= max_len):
+        await message.reply(f"Имя должно быть от {min_len} до {max_len} символов.")
+        return
+    if any(ch in new_name for ch in ("<", ">", "\n", "\t")):
+        await message.reply("Имя не должно содержать символы < > и переносы строк.")
+        return
+
+    banned = await moderation.check_banned_words(new_name)
+    if banned.triggered:
+        await message.reply("Это имя недоступно — содержит запрещённое слово.")
+        return
+
+    await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    allowed, remaining = await db.can_change_nickname(message.from_user.id, cooldown)
+    if not allowed:
+        days = remaining // 86400
+        hours = (remaining % 86400) // 3600
+        await message.reply(f"⏳ Следующая смена имени будет доступна через {days} дн. {hours} ч.")
+        return
+
+    _pending_nicknames[message.from_user.id] = new_name
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Подтвердить", callback_data=f"nickname:confirm:{message.from_user.id}")
+    kb.button(text="❌ Отмена", callback_data=f"nickname:cancel:{message.from_user.id}")
+    kb.adjust(2)
+    await message.reply(
+        f"Сменить отображаемое имя на «{html.escape(new_name)}»?\n"
+        f"Следующая смена будет доступна только через {cooldown // 86400} дн.",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("nickname:"))
+async def on_nickname_confirm(callback: CallbackQuery):
+    _, action, uid = callback.data.split(":")
+    uid = int(uid)
+    if callback.from_user.id != uid:
+        await callback.answer("Это не ваш запрос на смену имени.", show_alert=True)
+        return
+
+    if action == "cancel":
+        _pending_nicknames.pop(uid, None)
+        await callback.message.edit_text("Отменено. Имя не изменено.")
+        await callback.answer()
+        return
+
+    new_name = _pending_nicknames.pop(uid, None)
+    if new_name is None:
+        await callback.answer("Запрос устарел, отправьте /setname ещё раз.", show_alert=True)
+        return
+
+    await db.set_nickname(uid, new_name)
+    await db.add_log("setname", uid, uid, new_name)
+    await callback.message.edit_text(
+        f"✅ Готово! Теперь бот будет упоминать вас в чате как «{html.escape(new_name)}»."
+    )
+    await callback.answer()
+
+
 @router.message(Command("rank"))
 async def cmd_rank(message: Message):
     if not _is_allowed_chat(message.chat.id):
@@ -629,7 +728,7 @@ async def cmd_promote(message: Message, bot: Bot):
     await db.ensure_member(target.id, target.username, target.full_name)
     await db.grant_role(target.id, config.ROLE_MODERATOR, message.from_user.id)
     await db.add_log("promote", target.id, message.from_user.id, "role=moderator")
-    await message.reply(f"⭐ {target.mention_html()} назначен(а) модератором чата.")
+    await message.reply(f"⭐ {await display_mention(target)} назначен(а) модератором чата.")
 
 
 @router.message(Command("demote"))
@@ -639,7 +738,7 @@ async def cmd_demote(message: Message, bot: Bot):
         return
     await db.revoke_role(target.id)
     await db.add_log("demote", target.id, message.from_user.id, "")
-    await message.reply(f"➖ {target.mention_html()} больше не модератор.")
+    await message.reply(f"➖ {await display_mention(target)} больше не модератор.")
 
 
 @router.message(Command("mods"))
@@ -734,7 +833,7 @@ async def cmd_setrole(message: Message, bot: Bot, command: CommandObject):
     await db.ensure_member(target.id, target.username, target.full_name)
     await db.grant_role(target.id, role_key, message.from_user.id)
     await db.add_log("setrole", target.id, message.from_user.id, role_key)
-    await message.reply(f"✅ {target.mention_html()} назначен(а) роль «{role['title']}».")
+    await message.reply(f"✅ {await display_mention(target)} назначен(а) роль «{role['title']}».")
 
 
 @router.message(Command("removerole"))
@@ -751,7 +850,7 @@ async def cmd_removerole(message: Message, bot: Bot):
     target = message.reply_to_message.from_user
     await db.revoke_role(target.id)
     await db.add_log("removerole", target.id, message.from_user.id, "")
-    await message.reply(f"➖ Роль снята с {target.mention_html()}.")
+    await message.reply(f"➖ Роль снята с {await display_mention(target)}.")
 
 
 @router.message(Command("rep"))
@@ -776,9 +875,9 @@ async def cmd_rep(message: Message):
     await db.ensure_member(target.id, target.username, target.full_name)
     success, score = await db.add_reputation(target.id, message.from_user.id, cooldown)
     if not success:
-        await message.reply(f"⏳ Вы уже начисляли репутацию {target.mention_html()} недавно. Попробуйте позже.")
+        await message.reply(f"⏳ Вы уже начисляли репутацию {await display_mention(target)} недавно. Попробуйте позже.")
         return
-    await message.reply(f"⭐ {target.mention_html()} получил(а) +1 к репутации! Теперь: {score}")
+    await message.reply(f"⭐ {await display_mention(target)} получил(а) +1 к репутации! Теперь: {score}")
 
 
 @router.message(Command("top"))
@@ -877,7 +976,7 @@ async def cmd_give(message: Message, bot: Bot, command: CommandObject):
     new_balance = await db.add_balance(target.id, amount, f"admin_grant:{message.from_user.id}")
     await db.add_log("give", target.id, message.from_user.id, f"amount={amount}")
     currency = await db.get_setting("currency_name")
-    await message.reply(f"✅ {target.mention_html()} получил(а) {amount} {currency}. Баланс: {new_balance}")
+    await message.reply(f"✅ {await display_mention(target)} получил(а) {amount} {currency}. Баланс: {new_balance}")
 
 
 @router.message(Command("achievements"))
@@ -1041,14 +1140,14 @@ async def _process_engagement(bot: Bot, chat_id: int, user):
             currency = await db.get_setting("currency_name")
             bonus_text = f" (+{bonus} {currency})"
         try:
-            await bot.send_message(chat_id, f"🎉 {user.mention_html()} достиг {new_level} уровня!{bonus_text}")
+            await bot.send_message(chat_id, f"🎉 {await display_mention(user)} достиг {new_level} уровня!{bonus_text}")
         except Exception:
             pass
 
     for ach in await db.check_and_award_achievements(user.id):
         try:
             await bot.send_message(
-                chat_id, f"🏆 {user.mention_html()} получил(а) достижение «{ach['title']}»!\n{ach['description']}"
+                chat_id, f"🏆 {await display_mention(user)} получил(а) достижение «{ach['title']}»!\n{ach['description']}"
             )
         except Exception:
             pass
@@ -1113,9 +1212,9 @@ async def on_message(message: Message, bot: Bot):
         )
 
         notice = {
-            "warn": f"⚠️ {message.from_user.mention_html()}, предупреждение: {final_verdict.reason}",
-            "mute": f"🔇 {message.from_user.mention_html()} замучен ({extra // 60} мин.). Причина: {final_verdict.reason}",
-            "ban": f"🚫 {message.from_user.mention_html()} забанен за повторные нарушения.",
+            "warn": f"⚠️ {await display_mention(message.from_user)}, предупреждение: {final_verdict.reason}",
+            "mute": f"🔇 {await display_mention(message.from_user)} замучен ({extra // 60} мин.). Причина: {final_verdict.reason}",
+            "ban": f"🚫 {await display_mention(message.from_user)} забанен за повторные нарушения.",
         }[action]
         try:
             sent = await bot.send_message(message.chat.id, notice)

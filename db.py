@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS members (
     warns_count INTEGER DEFAULT 0,
     is_muted INTEGER DEFAULT 0,
     muted_until INTEGER DEFAULT 0,
-    is_banned INTEGER DEFAULT 0
+    is_banned INTEGER DEFAULT 0,
+    custom_nickname TEXT,
+    nickname_changed_at INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS warnings (
@@ -157,11 +159,25 @@ CREATE TABLE IF NOT EXISTS reports (
 _conn: Optional[aiosqlite.Connection] = None
 
 
+async def _run_migrations():
+    """CREATE TABLE IF NOT EXISTS не добавляет новые колонки в уже существующие таблицы —
+    эта функция догоняет схему на базах, развёрнутых до появления новых полей (например,
+    на Railway, где bot.db переживает деплои благодаря Volume)."""
+    async with _conn.execute("PRAGMA table_info(members)") as cur:
+        columns = {row[1] async for row in cur}
+    if "custom_nickname" not in columns:
+        await _conn.execute("ALTER TABLE members ADD COLUMN custom_nickname TEXT")
+    if "nickname_changed_at" not in columns:
+        await _conn.execute("ALTER TABLE members ADD COLUMN nickname_changed_at INTEGER DEFAULT 0")
+    await _conn.commit()
+
+
 async def init_db():
     global _conn
     _conn = await aiosqlite.connect(config.DB_PATH)
     await _conn.executescript(_SCHEMA)
     await _conn.commit()
+    await _run_migrations()
 
     # Заполняем настройки по умолчанию, если их ещё нет
     for key, value in config.DEFAULT_SETTINGS.items():
@@ -305,6 +321,33 @@ async def clear_muted(user_id: int):
 
 async def set_banned(user_id: int, banned: bool):
     await _conn.execute("UPDATE members SET is_banned = ? WHERE user_id = ?", (1 if banned else 0, user_id))
+    await _conn.commit()
+
+
+# ---------- CUSTOM NICKNAME (отображаемое имя при упоминаниях бота в чате) ----------
+
+async def get_nickname(user_id: int) -> Optional[str]:
+    async with _conn.execute("SELECT custom_nickname FROM members WHERE user_id = ?", (user_id,)) as cur:
+        row = await cur.fetchone()
+        return row[0] if row and row[0] else None
+
+
+async def can_change_nickname(user_id: int, cooldown_sec: int) -> tuple[bool, int]:
+    """Возвращает (можно_ли_менять, секунд_до_след_попытки)."""
+    async with _conn.execute("SELECT nickname_changed_at FROM members WHERE user_id = ?", (user_id,)) as cur:
+        row = await cur.fetchone()
+    last_change = row[0] if row and row[0] else 0
+    elapsed = int(time.time()) - last_change
+    if elapsed >= cooldown_sec:
+        return True, 0
+    return False, cooldown_sec - elapsed
+
+
+async def set_nickname(user_id: int, nickname: str):
+    await _conn.execute(
+        "UPDATE members SET custom_nickname = ?, nickname_changed_at = ? WHERE user_id = ?",
+        (nickname, int(time.time()), user_id),
+    )
     await _conn.commit()
 
 

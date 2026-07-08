@@ -46,6 +46,9 @@ DEFAULT_SETTINGS = {
     "captcha_timeout_sec": "120",        # сколько времени даётся новичку на подтверждение
     "warn_expiry_days": "30",            # предупреждения старше N дней не учитываются при эскалации наказаний
     "report_cooldown_sec": "120",        # антиспам жалоб: не чаще раза в N секунд с одного участника
+    "nickname_change_cooldown_sec": "172800",  # смена имени — не чаще раза в 2 суток
+    "nickname_min_length": "2",
+    "nickname_max_length": "32",
     "reputation_enabled": "1",
     "reputation_cooldown_sec": "3600",   # раз в сколько времени можно выдать +1 репутации тому же человеку
     # --- Экономика ---

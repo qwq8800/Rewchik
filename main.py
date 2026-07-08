@@ -296,6 +296,58 @@ async def cmd_stats(message: Message, bot: Bot):
     )
 
 
+@router.message(Command("report"))
+async def cmd_report(message: Message, bot: Bot, command: CommandObject):
+    """Жалоба участника на сообщение (ответом). Уведомляет админов/модераторов кнопками для быстрой реакции."""
+    if not _is_group_chat(message.chat.id):
+        return
+    if not message.reply_to_message:
+        await message.reply("ℹ️ Ответьте командой /report на проблемное сообщение.")
+        return
+
+    target = message.reply_to_message.from_user
+    if target.id == message.from_user.id:
+        await message.reply("Нельзя пожаловаться на самого себя 🙂")
+        return
+    if target.is_bot:
+        await message.reply("На ботов жаловаться нет смысла 🙂")
+        return
+
+    role = await _get_effective_role(bot, message.chat.id, target.id)
+    if role in ("admin", "moderator"):
+        await message.reply("На администраторов и модераторов пожаловаться через эту команду нельзя.")
+        return
+
+    cooldown = int(await db.get_setting("report_cooldown_sec"))
+    last = await db.get_last_report_time(message.from_user.id)
+    if int(time.time()) - last < cooldown:
+        await message.reply("⏳ Вы недавно уже отправляли жалобу. Подождите немного, чтобы не спамить.")
+        return
+
+    reason = command.args or "без указания причины"
+    snippet_source = message.reply_to_message.text or message.reply_to_message.caption or "(сообщение без текста)"
+    snippet = snippet_source[:200]
+
+    await db.ensure_member(target.id, target.username, target.full_name)
+    report_id = await db.add_report(message.from_user.id, target.id, message.reply_to_message.message_id, snippet, reason)
+    await db.add_log("report", target.id, message.from_user.id, f"report_id={report_id} reason={reason}")
+
+    await message.reply("✅ Жалоба отправлена администраторам и модераторам.")
+
+    try:
+        await bot.send_message(
+            message.chat.id,
+            f"📨 <b>Новая жалоба #{report_id}</b>\n"
+            f"От: {message.from_user.mention_html()}\n"
+            f"На: {target.mention_html()}\n"
+            f"Причина: {reason}\n"
+            f"Сообщение: <i>{snippet}</i>",
+            reply_markup=keyboards.report_action_keyboard(report_id),
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось отправить уведомление о жалобе: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Ручные команды модерации (через reply на сообщение нарушителя)
 # ---------------------------------------------------------------------------

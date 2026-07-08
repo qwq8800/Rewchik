@@ -131,6 +131,19 @@ CREATE TABLE IF NOT EXISTS inventory (
     equipped INTEGER DEFAULT 0,
     PRIMARY KEY (user_id, item_key)
 );
+
+CREATE TABLE IF NOT EXISTS reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reporter_id INTEGER,
+    target_id INTEGER,
+    message_id INTEGER,
+    message_snippet TEXT,
+    reason TEXT,
+    status TEXT DEFAULT 'open',
+    created_at INTEGER,
+    resolved_by INTEGER,
+    resolved_at INTEGER
+);
 """
 
 _conn: Optional[aiosqlite.Connection] = None
@@ -749,3 +762,52 @@ async def get_equipped_badge(user_id: int):
         (user_id,),
     ) as cur:
         return await cur.fetchone()
+
+
+# ---------- REPORTS (жалобы участников) ----------
+
+async def add_report(reporter_id: int, target_id: int, message_id: int, message_snippet: str, reason: str) -> int:
+    cur = await _conn.execute(
+        "INSERT INTO reports (reporter_id, target_id, message_id, message_snippet, reason, status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, 'open', ?)",
+        (reporter_id, target_id, message_id, message_snippet, reason, int(time.time())),
+    )
+    await _conn.commit()
+    return cur.lastrowid
+
+
+async def get_last_report_time(reporter_id: int) -> int:
+    async with _conn.execute(
+        "SELECT created_at FROM reports WHERE reporter_id = ? ORDER BY created_at DESC LIMIT 1", (reporter_id,)
+    ) as cur:
+        row = await cur.fetchone()
+        return row[0] if row else 0
+
+
+async def get_report(report_id: int):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)) as cur:
+        return await cur.fetchone()
+
+
+async def get_open_reports(limit: int = 8, offset: int = 0):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute(
+        "SELECT * FROM reports WHERE status = 'open' ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        (limit, offset),
+    ) as cur:
+        return await cur.fetchall()
+
+
+async def count_open_reports() -> int:
+    async with _conn.execute("SELECT COUNT(*) FROM reports WHERE status = 'open'") as cur:
+        row = await cur.fetchone()
+        return row[0]
+
+
+async def resolve_report(report_id: int, status: str, resolved_by: int):
+    await _conn.execute(
+        "UPDATE reports SET status = ?, resolved_by = ?, resolved_at = ? WHERE id = ?",
+        (status, resolved_by, int(time.time()), report_id),
+    )
+    await _conn.commit()

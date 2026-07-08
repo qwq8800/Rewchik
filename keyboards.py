@@ -13,6 +13,7 @@ def main_menu() -> InlineKeyboardMarkup:
     b.button(text="🚫 Модерация", callback_data="panel:moderation")
     b.button(text="📜 Логи", callback_data="panel:logs:0")
     b.button(text="👥 Пользователи", callback_data="panel:users")
+    b.button(text="📨 Жалобы", callback_data="panel:reports:0")
     b.button(text="🎭 Роли", callback_data="panel:roles")
     b.button(text="⭐ Репутация", callback_data="panel:reputation")
     b.button(text="💰 Экономика", callback_data="panel:economy")
@@ -21,7 +22,7 @@ def main_menu() -> InlineKeyboardMarkup:
     b.button(text="📊 Статистика", callback_data="panel:stats")
     b.button(text="⚙️ Настройки", callback_data="panel:settings")
     b.button(text="❌ Закрыть", callback_data="panel:close")
-    b.adjust(2, 2, 2, 2, 2, 1)
+    b.adjust(2, 2, 2, 2, 2, 2)
     return b.as_markup()
 
 
@@ -146,4 +147,32 @@ def confirm_keyboard(action: str, target: str) -> InlineKeyboardMarkup:
     b.button(text="✅ Да", callback_data=f"panel:confirm:{action}:{target}")
     b.button(text="❌ Отмена", callback_data="panel:main")
     b.adjust(2)
+    return b.as_markup()
+
+
+def report_action_keyboard(report_id: int) -> InlineKeyboardMarkup:
+    """Кнопки прямо под уведомлением о жалобе в чате — для быстрой реакции админа/модератора."""
+    b = InlineKeyboardBuilder()
+    b.button(text="🔇 Мут 30м", callback_data=f"report:mute:{report_id}")
+    b.button(text="🚫 Бан", callback_data=f"report:ban:{report_id}")
+    b.button(text="✅ Отклонить", callback_data=f"report:dismiss:{report_id}")
+    b.adjust(3)
+    return b.as_markup()
+
+
+def reports_list(rows, offset: int, total: int, limit: int = 8) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for r in rows:
+        b.button(text=f"Жалоба #{r['id']}", callback_data=f"panel:report_view:{r['id']}")
+    b.adjust(2)
+
+    nav_row = []
+    if offset > 0:
+        nav_row.append(InlineKeyboardButton(text="◀️ Пред.", callback_data=f"panel:reports:{max(0, offset - limit)}"))
+    if offset + limit < total:
+        nav_row.append(InlineKeyboardButton(text="След. ▶️", callback_data=f"panel:reports:{offset + limit}"))
+    if nav_row:
+        b.row(*nav_row)
+
+    b.row(InlineKeyboardButton(text="🔙 Назад", callback_data="panel:main"))
     return b.as_markup()

@@ -25,6 +25,13 @@ async def _is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
         return False
 
 
+async def _is_moderator_or_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    if await _is_admin(bot, chat_id, user_id):
+        return True
+    role = await db.get_role(user_id)
+    return role == config.ROLE_MODERATOR
+
+
 @router.callback_query(F.data.startswith("panel:"))
 async def panel_router(callback: CallbackQuery, bot: Bot):
     if not await _is_admin(bot, callback.message.chat.id, callback.from_user.id):
@@ -88,6 +95,14 @@ async def panel_router(callback: CallbackQuery, bot: Bot):
     elif section == "logs":
         offset = int(parts[2])
         await _show_logs(callback, offset)
+
+    elif section == "reports":
+        offset = int(parts[2])
+        await _show_reports(callback, offset)
+
+    elif section == "report_view":
+        report_id = int(parts[2])
+        await _show_report_detail(callback, report_id)
 
     elif section == "roles":
         rows = await db.list_roles(config.ROLE_MODERATOR)
@@ -223,3 +238,76 @@ async def _show_logs(callback: CallbackQuery, offset: int):
             lines.append(f"[{ts}] {r['action']} — user:{r['user_id']} {r['details']}")
         text = "\n".join(lines)
     await callback.message.edit_text(text, reply_markup=keyboards.logs_list(offset, total))
+
+
+async def _show_reports(callback: CallbackQuery, offset: int):
+    rows = await db.get_open_reports(offset=offset)
+    total = await db.count_open_reports()
+    if not rows:
+        text = "📨 <b>Жалобы</b>\n\nОткрытых жалоб нет."
+    else:
+        lines = ["📨 <b>Открытые жалобы</b>", ""]
+        for r in rows:
+            ts = time.strftime("%d.%m %H:%M", time.localtime(r["created_at"]))
+            lines.append(f"#{r['id']} [{ts}] на user:{r['target_id']} — {r['reason']}")
+        text = "\n".join(lines)
+    await callback.message.edit_text(text, reply_markup=keyboards.reports_list(rows, offset, total))
+
+
+async def _show_report_detail(callback: CallbackQuery, report_id: int):
+    r = await db.get_report(report_id)
+    if r is None:
+        await callback.answer("Жалоба не найдена.", show_alert=True)
+        return
+    text = (
+        f"📨 <b>Жалоба #{r['id']}</b>\n\n"
+        f"От: user:{r['reporter_id']}\n"
+        f"На: user:{r['target_id']}\n"
+        f"Причина: {r['reason']}\n"
+        f"Статус: {r['status']}\n\n"
+        f"Сообщение: <i>{r['message_snippet']}</i>"
+    )
+    if r["status"] == "open":
+        await callback.message.edit_text(text, reply_markup=keyboards.report_action_keyboard(report_id))
+    else:
+        await callback.message.edit_text(text, reply_markup=keyboards.back_only_menu("panel:reports:0"))
+
+
+@router.callback_query(F.data.startswith("report:"))
+async def report_action_router(callback: CallbackQuery, bot: Bot):
+    """Кнопки быстрого реагирования под уведомлением о жалобе в чате."""
+    if not await _is_moderator_or_admin(bot, callback.message.chat.id, callback.from_user.id):
+        await callback.answer("⛔ Только для администраторов и модераторов", show_alert=True)
+        return
+
+    _, action, report_id = callback.data.split(":")
+    report_id = int(report_id)
+    r = await db.get_report(report_id)
+    if r is None:
+        await callback.answer("Жалоба не найдена (возможно, уже обработана).", show_alert=True)
+        return
+    if r["status"] != "open":
+        await callback.answer(f"Жалоба уже обработана ({r['status']}).", show_alert=True)
+        return
+
+    chat_id = callback.message.chat.id
+    target_id = r["target_id"]
+
+    if action == "mute":
+        await punishments.mute_user(bot, chat_id, target_id, 30 * 60, "по жалобе")
+        await db.resolve_report(report_id, "resolved", callback.from_user.id)
+        await db.add_log("report_resolved", target_id, callback.from_user.id, f"report_id={report_id} action=mute")
+        await callback.message.edit_text(callback.message.text + "\n\n✅ Обработано: мут 30 мин.", reply_markup=None)
+
+    elif action == "ban":
+        await punishments.ban_user(bot, chat_id, target_id, "по жалобе", callback.from_user.id)
+        await db.resolve_report(report_id, "resolved", callback.from_user.id)
+        await db.add_log("report_resolved", target_id, callback.from_user.id, f"report_id={report_id} action=ban")
+        await callback.message.edit_text(callback.message.text + "\n\n✅ Обработано: бан.", reply_markup=None)
+
+    elif action == "dismiss":
+        await db.resolve_report(report_id, "dismissed", callback.from_user.id)
+        await db.add_log("report_dismissed", target_id, callback.from_user.id, f"report_id={report_id}")
+        await callback.message.edit_text(callback.message.text + "\n\n❌ Жалоба отклонена.", reply_markup=None)
+
+    await callback.answer("Готово ✅")

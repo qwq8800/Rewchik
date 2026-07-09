@@ -169,6 +169,15 @@ async def _run_migrations():
         await _conn.execute("ALTER TABLE members ADD COLUMN custom_nickname TEXT")
     if "nickname_changed_at" not in columns:
         await _conn.execute("ALTER TABLE members ADD COLUMN nickname_changed_at INTEGER DEFAULT 0")
+
+    # Обновляем приветствие на актуальный текст (с /help), только если админ его не менял вручную
+    async with _conn.execute("SELECT value FROM settings WHERE key = 'welcome_text'") as cur:
+        row = await cur.fetchone()
+    if row and row[0] in config.LEGACY_DEFAULT_WELCOME_TEXTS:
+        await _conn.execute(
+            "UPDATE settings SET value = ? WHERE key = 'welcome_text'", (config.DEFAULT_SETTINGS["welcome_text"],)
+        )
+
     await _conn.commit()
 
 

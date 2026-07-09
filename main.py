@@ -53,13 +53,60 @@ _duel_counter = 0
 async def cmd_start(message: Message):
     await message.answer(
         "👋 Привет! Я бот чата @RewchikChat.\n\n"
-        "📋 Мои команды:\n"
-        "/rules — правила чата\n"
-        "/rank — твой уровень и статистика\n"
-        "/top — топ участников\n"
-        "/rep — дать репутацию (ответом на сообщение)\n\n"
-        "Остальные функции работают в группе @RewchikChat."
+        "📋 Полный список команд: /help\n"
+        "📜 Правила чата: /rules\n\n"
+        "Модерация и админ-функции работают только в самой группе @RewchikChat."
     )
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    if not _is_allowed_chat(message.chat.id):
+        return
+    text = (
+        "📋 <b>Все команды бота</b>\n\n"
+
+        "👤 <b>Общие</b>\n"
+        "/rules — правила чата\n"
+        "/help — этот список команд\n"
+        "/rank — свой уровень, XP, репутация, баланс\n"
+        "/setname &lt;имя&gt; — задать имя, которым бот будет тегать вас в чате (раз в 2 суток, с подтверждением)\n"
+        "/top — топ участников по XP, репутации и балансу\n"
+        "/rep — начислить +1 репутации (ответом на сообщение, раз в час)\n"
+        "/mods — список назначенных модераторов\n"
+        "/roles — список ролей чата и их прав\n"
+        "/report [причина] — пожаловаться на сообщение (ответом)\n"
+        "/achievements — список достижений и прогресс\n\n"
+
+        "💰 <b>Экономика</b>\n"
+        "/balance — узнать баланс\n"
+        "/daily — забрать ежедневный бонус\n"
+        "/shop — магазин косметических бейджей\n"
+        "/buy &lt;код&gt; — купить товар\n"
+        "/inventory — ваш инвентарь\n"
+        "/equip &lt;код&gt; — экипировать бейдж (виден в /rank)\n\n"
+
+        "🎮 <b>Мини-игры</b>\n"
+        "/dice &lt;ставка&gt; — кубик, честные 50/50\n"
+        "/coinflip &lt;ставка&gt; &lt;орёл|решка&gt; — монетка, честные 50/50\n"
+        "/slots &lt;ставка&gt; — слот-машина\n"
+        "/duel &lt;ставка&gt; — вызов на дуэль (ответом на сообщение соперника)\n\n"
+
+        "🛡 <b>Для модераторов</b> (право «moderate» — по умолчанию у роли «модератор»)\n"
+        "/warn, /mute [минуты], /unmute — ответом на сообщение нарушителя\n"
+        "/stats — обзор чата (право «view_stats»)\n\n"
+
+        "👑 <b>Только для администраторов</b>\n"
+        "/settings — кнопочная админ-панель\n"
+        "/kick, /ban, /unban — ответом на сообщение (право «kick_ban»)\n"
+        "/promote, /demote — быстрый ярлык для роли «модератор»\n"
+        "/give &lt;количество&gt; — выдать монеты участнику\n"
+        "/createrole, /setrole, /removerole — гибкие роли с правами\n"
+        "/setflood, /setwelcome, /setwarnexpiry — настройки модерации\n"
+        "/addword, /delword, /words — стоп-слова\n"
+        "/adddomain, /deldomain, /domains — чёрный список доменов"
+    )
+    await message.reply(text)
 
 @router.my_chat_member()
 async def on_bot_added_to_chat(event: ChatMemberUpdated, bot: Bot):
@@ -267,8 +314,7 @@ async def on_member_leave(event: ChatMemberUpdated, bot: Bot):
 async def cmd_settings(message: Message, bot: Bot):
     if not _is_group_chat(message.chat.id):
         return
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if member.status not in ("creator", "administrator"):
+    if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
         return
     await message.reply("🛠 <b>Админ-панель @RewchikChat</b>\nВыберите раздел:", reply_markup=keyboards.main_menu())
@@ -366,8 +412,7 @@ async def cmd_report(message: Message, bot: Bot, command: CommandObject):
 async def _require_admin_and_target(message: Message, bot: Bot):
     if not _is_group_chat(message.chat.id):
         return None
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if member.status not in ("creator", "administrator"):
+    if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
         return None
     if not message.reply_to_message:
@@ -386,11 +431,21 @@ async def display_mention(user) -> str:
     return user.mention_html()
 
 
-async def _get_effective_role(bot: Bot, chat_id: int, user_id: int) -> str:
-    """admin — реальный Telegram-админ/создатель; moderator — назначена любая кастомная роль; member — все остальные.
-    Для точечной проверки конкретных прав используйте _has_permission()."""
+async def _is_full_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """Главный админ бота (config.SUPER_ADMIN_ID) имеет все права всегда, независимо
+    от того, выдал ли ему Telegram статус admin/creator в самом чате. Помимо него —
+    обычная проверка реального статуса creator/administrator."""
+    if user_id == config.SUPER_ADMIN_ID:
+        return True
     member = await bot.get_chat_member(chat_id, user_id)
-    if member.status in ("creator", "administrator"):
+    return member.status in ("creator", "administrator")
+
+
+async def _get_effective_role(bot: Bot, chat_id: int, user_id: int) -> str:
+    """admin — реальный Telegram-админ/создатель (или главный админ бота); moderator — назначена
+    любая кастомная роль; member — все остальные. Для точечной проверки конкретных прав
+    используйте _has_permission()."""
+    if await _is_full_admin(bot, chat_id, user_id):
         return "admin"
     role = await db.get_role(user_id)
     if role:
@@ -399,10 +454,10 @@ async def _get_effective_role(bot: Bot, chat_id: int, user_id: int) -> str:
 
 
 async def _has_permission(bot: Bot, chat_id: int, user_id: int, permission: str) -> bool:
-    """Реальные Telegram-админы/создатель имеют все права всегда. Остальные — только то,
-    что явно указано в permissions их назначенной кастомной роли (раздел «Роли» ТЗ)."""
-    member = await bot.get_chat_member(chat_id, user_id)
-    if member.status in ("creator", "administrator"):
+    """Реальные Telegram-админы/создатель (и главный админ бота) имеют все права всегда.
+    Остальные — только то, что явно указано в permissions их назначенной кастомной роли
+    (раздел «Роли» ТЗ)."""
+    if await _is_full_admin(bot, chat_id, user_id):
         return True
     return await db.user_has_permission(user_id, permission)
 
@@ -769,8 +824,7 @@ async def cmd_createrole(message: Message, bot: Bot, command: CommandObject):
     Использование: /createrole <ключ> <название>; <право1,право2,...>"""
     if not _is_group_chat(message.chat.id):
         return
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if member.status not in ("creator", "administrator"):
+    if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
         return
     if not command.args or ";" not in command.args:
@@ -818,8 +872,7 @@ async def cmd_setrole(message: Message, bot: Bot, command: CommandObject):
     """Назначить участнику любую из созданных кастомных ролей (только реальные админы)."""
     if not _is_group_chat(message.chat.id):
         return
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if member.status not in ("creator", "administrator"):
+    if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
         return
     if not message.reply_to_message:
@@ -846,8 +899,7 @@ async def cmd_setrole(message: Message, bot: Bot, command: CommandObject):
 async def cmd_removerole(message: Message, bot: Bot):
     if not _is_group_chat(message.chat.id):
         return
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if member.status not in ("creator", "administrator"):
+    if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
         return
     if not message.reply_to_message:

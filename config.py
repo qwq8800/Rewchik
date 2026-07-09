@@ -15,6 +15,19 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
 ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID", "-1004458436938"))
 ALLOWED_CHAT_USERNAME = "RewchikChat"
 
+# --- Главный администратор бота ---
+# Имеет полные права администратора чата на уровне бота (открывает /settings,
+# создаёт и назначает роли, банит/кикает/мутит и т.д.) независимо от того,
+# выданы ли ему реальные права администратора в самом Telegram-чате.
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "8375758522"))
+SUPER_ADMIN_USERNAME = "Luvkryacan"
+
+# --- Главный администратор бота ---
+# Имеет все права всегда (может назначать роли, менять настройки, банить и т.д.),
+# даже если Telegram не выдал ему статус admin/creator в самом чате.
+SUPER_ADMIN_ID = 8375758522
+SUPER_ADMIN_USERNAME = "Luvkryacan"
+
 # --- База данных ---
 # На Railway подключите Volume и смонтируйте его в /data, затем задайте
 # переменную окружения DB_PATH=/data/bot.db — иначе SQLite-файл будет
@@ -39,7 +52,7 @@ DEFAULT_SETTINGS = {
     "antirepeat_enabled": "1",
     "antirepeat_min_length": "6",       # "ААААААА" от скольки одинаковых символов подряд
     "welcome_enabled": "1",
-    "welcome_text": "👋 Добро пожаловать в {chat_title}, {user_mention}!\nПеред тем как начать общение, ознакомься с правилами чата.",
+    "welcome_text": "👋 Добро пожаловать в {chat_title}, {user_mention}!\nПравила чата: /rules\nВсе команды бота: /help",
     "farewell_enabled": "1",
     "farewell_text": "👋 {user_mention} покинул(а) чат.",
     "captcha_enabled": "1",
@@ -125,6 +138,13 @@ DEFAULT_SHOP_ITEMS = [
     ("badge_crown", "👑 Бейдж «Корона»", "Косметический бейдж рядом с ником в /rank", 500),
     ("badge_fire", "🔥 Бейдж «Огонь»", "Косметический бейдж рядом с ником в /rank", 150),
     ("badge_diamond", "💎 Бейдж «Бриллиант»", "Косметический бейдж рядом с ником в /rank", 1000),
+]
+
+# Предыдущее значение welcome_text по умолчанию — используется миграцией в db.py,
+# чтобы обновить приветствие на уже развёрнутых ботах, но НЕ трогать текст, если
+# администратор чата настроил его вручную через /setwelcome.
+LEGACY_DEFAULT_WELCOME_TEXTS = [
+    "👋 Добро пожаловать в {chat_title}, {user_mention}!\nПеред тем как начать общение, ознакомься с правилами чата.",
 ]
 
 

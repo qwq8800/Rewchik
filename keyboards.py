@@ -150,6 +150,14 @@ def confirm_keyboard(action: str, target: str) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
+def duel_challenge_keyboard(duel_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="⚔️ Принять вызов", callback_data=f"duel:accept:{duel_id}")
+    b.button(text="❌ Отклонить", callback_data=f"duel:decline:{duel_id}")
+    b.adjust(2)
+    return b.as_markup()
+
+
 def report_action_keyboard(report_id: int) -> InlineKeyboardMarkup:
     """Кнопки прямо под уведомлением о жалобе в чате — для быстрой реакции админа/модератора."""
     b = InlineKeyboardBuilder()

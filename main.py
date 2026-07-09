@@ -37,6 +37,12 @@ router = Router(name="main")
 # в течение той же сессии, а не через рестарты (в отличие от мутов/капчи).
 _pending_nicknames: dict[int, str] = {}
 
+# Ожидающие ответа дуэли: duel_id -> {"initiator_id", "target_id", "bet"}.
+# Аналогично никнеймам — недолговечное состояние, рестарт процесса просто
+# отменяет незавершённые вызовы, деньги при этом не списываются заранее.
+_pending_duels: dict[int, dict] = {}
+_duel_counter = 0
+
 
 # ---------------------------------------------------------------------------
 # Ограничение бота одним чатом
@@ -994,30 +1000,26 @@ async def cmd_achievements(message: Message):
     await message.reply("\n".join(lines))
 
 
-@router.message(Command("dice"))
-async def cmd_dice(message: Message, command: CommandObject):
-    """Мини-игра: ставка на кубик 1-6. Выпало 4-6 — выигрыш x2, иначе ставка сгорает."""
-    if not _is_allowed_chat(message.chat.id):
-        return
+async def _check_minigame_bet(message: Message, bet_str: str, min_key: str, max_key: str):
+    """Общая проверка для всех мини-игр: включена ли экономика, валидна ли ставка,
+    хватает ли средств. Возвращает (bet, currency) при успехе, иначе (None, None)
+    — сообщение об ошибке уже отправлено пользователю."""
     if not await db.get_bool_setting("economy_enabled") or not await db.get_bool_setting("minigames_enabled"):
         await message.reply("Мини-игры сейчас отключены.")
-        return
-    if not command.args:
-        await message.reply("Использование: /dice <ставка>")
-        return
+        return None, None
     try:
-        bet = int(command.args.split()[0])
-    except ValueError:
-        await message.reply("Использование: /dice <ставка>")
-        return
+        bet = int(bet_str)
+    except (ValueError, TypeError):
+        await message.reply("Ставка должна быть целым числом.")
+        return None, None
 
-    min_bet = int(await db.get_setting("dice_min_bet"))
-    max_bet = int(await db.get_setting("dice_max_bet"))
+    min_bet = int(await db.get_setting(min_key))
+    max_bet = int(await db.get_setting(max_key))
     currency = await db.get_setting("currency_name")
 
     if bet < min_bet or bet > max_bet:
         await message.reply(f"Ставка должна быть от {min_bet} до {max_bet} {currency}.")
-        return
+        return None, None
 
     await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
     starting = int(await db.get_setting("starting_balance"))
@@ -1025,6 +1027,22 @@ async def cmd_dice(message: Message, command: CommandObject):
     balance = await db.get_balance(message.from_user.id)
     if balance < bet:
         await message.reply(f"Недостаточно средств. Ваш баланс: {balance} {currency}.")
+        return None, None
+
+    return bet, currency
+
+
+@router.message(Command("dice"))
+async def cmd_dice(message: Message, command: CommandObject):
+    """Мини-игра: ставка на кубик 1-6. Выпало 4-6 — выигрыш x2, иначе ставка сгорает."""
+    if not _is_allowed_chat(message.chat.id):
+        return
+    if not command.args:
+        await message.reply("Использование: /dice <ставка>")
+        return
+
+    bet, currency = await _check_minigame_bet(message, command.args.split()[0], "dice_min_bet", "dice_max_bet")
+    if bet is None:
         return
 
     roll_msg = await message.answer_dice(emoji="🎲")
@@ -1038,6 +1056,230 @@ async def cmd_dice(message: Message, command: CommandObject):
     else:
         new_balance = await db.add_balance(message.from_user.id, -bet, "dice_loss")
         await message.reply(f"🎲 Выпало {value}. Вы проиграли {bet} {currency}.\nБаланс: {new_balance}")
+
+
+@router.message(Command("coinflip"))
+async def cmd_coinflip(message: Message, command: CommandObject):
+    """Мини-игра: орёл/решка. Угадал сторону — выигрыш x2."""
+    if not _is_allowed_chat(message.chat.id):
+        return
+    if not command.args or len(command.args.split()) < 2:
+        await message.reply("Использование: /coinflip <ставка> <орёл|решка>")
+        return
+
+    bet_str, side_raw = command.args.split()[0], command.args.split()[1].lower()
+    side_map = {"орел": "орёл", "орёл": "орёл", "решка": "решка", "heads": "орёл", "tails": "решка"}
+    side = side_map.get(side_raw)
+    if side is None:
+        await message.reply("Сторона должна быть «орёл» или «решка». Использование: /coinflip <ставка> <орёл|решка>")
+        return
+
+    bet, currency = await _check_minigame_bet(message, bet_str, "coinflip_min_bet", "coinflip_max_bet")
+    if bet is None:
+        return
+
+    result = random.choice(["орёл", "решка"])
+    suspense = await message.reply("🪙 Подбрасываем монетку...")
+    await asyncio.sleep(1.5)
+
+    if result == side:
+        new_balance = await db.add_balance(message.from_user.id, bet, "coinflip_win")
+        await suspense.edit_text(f"🪙 Выпал(а) «{result}»! Вы угадали и выиграли {bet} {currency}.\nБаланс: {new_balance}")
+    else:
+        new_balance = await db.add_balance(message.from_user.id, -bet, "coinflip_loss")
+        await suspense.edit_text(f"🪙 Выпал(а) «{result}». Вы проиграли {bet} {currency}.\nБаланс: {new_balance}")
+
+
+SLOT_SYMBOLS = ["🍒", "🍋", "⭐", "💎", "7️⃣"]
+SLOT_TRIPLE_MULTIPLIER = {"💎": 8, "7️⃣": 6, "⭐": 5}
+SLOT_TRIPLE_DEFAULT_MULTIPLIER = 3
+
+
+@router.message(Command("slots"))
+async def cmd_slots(message: Message, command: CommandObject):
+    """Мини-игра: слот-машина. 3 одинаковых символа — крупный выигрыш, 2 одинаковых — возврат ставки."""
+    if not _is_allowed_chat(message.chat.id):
+        return
+    if not command.args:
+        await message.reply("Использование: /slots <ставка>")
+        return
+
+    bet, currency = await _check_minigame_bet(message, command.args.split()[0], "slots_min_bet", "slots_max_bet")
+    if bet is None:
+        return
+
+    suspense = await message.reply("🎰 [ ❓ | ❓ | ❓ ]\nКрутим барабан...")
+    await asyncio.sleep(1.5)
+
+    reels = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
+    reel_text = f"[ {reels[0]} | {reels[1]} | {reels[2]} ]"
+
+    if reels[0] == reels[1] == reels[2]:
+        multiplier = SLOT_TRIPLE_MULTIPLIER.get(reels[0], SLOT_TRIPLE_DEFAULT_MULTIPLIER)
+        winnings = bet * multiplier
+        new_balance = await db.add_balance(message.from_user.id, winnings, "slots_win")
+        await suspense.edit_text(
+            f"🎰 {reel_text}\n💥 Джекпот! Три одинаковых — выигрыш x{multiplier}: {winnings} {currency}.\nБаланс: {new_balance}"
+        )
+    elif reels[0] == reels[1] or reels[1] == reels[2] or reels[0] == reels[2]:
+        winnings = bet * 3 // 2  # небольшой выигрыш x1.5 при двух совпадениях
+        new_balance = await db.add_balance(message.from_user.id, winnings - bet, "slots_small_win")
+        await suspense.edit_text(f"🎰 {reel_text}\nДва совпадения — небольшой выигрыш: {winnings} {currency}.\nБаланс: {new_balance}")
+    else:
+        new_balance = await db.add_balance(message.from_user.id, -bet, "slots_loss")
+        await suspense.edit_text(f"🎰 {reel_text}\nНичего не совпало — ставка сгорела.\nБаланс: {new_balance}")
+
+
+@router.message(Command("duel"))
+async def cmd_duel(message: Message, command: CommandObject):
+    """Дуэль на ставку между двумя игроками (ответом на сообщение соперника).
+    Требует подтверждения от соперника кнопкой — деньги списываются только после его согласия."""
+    global _duel_counter
+
+    if not _is_group_chat(message.chat.id):  # дуэль — только в группе, второй игрок должен быть виден в чате
+        return
+    if not await db.get_bool_setting("economy_enabled") or not await db.get_bool_setting("minigames_enabled"):
+        await message.reply("Мини-игры сейчас отключены.")
+        return
+    if not message.reply_to_message:
+        await message.reply("ℹ️ Ответьте командой /duel <ставка> на сообщение соперника, чтобы бросить ему вызов.")
+        return
+    if not command.args:
+        await message.reply("Использование: /duel <ставка> (ответом на сообщение соперника)")
+        return
+
+    opponent = message.reply_to_message.from_user
+    if opponent.id == message.from_user.id:
+        await message.reply("Нельзя вызвать на дуэль самого себя 🙂")
+        return
+    if opponent.is_bot:
+        await message.reply("Боты на дуэли не выходят 🙂")
+        return
+
+    try:
+        bet = int(command.args.split()[0])
+    except ValueError:
+        await message.reply("Использование: /duel <ставка> (ответом на сообщение соперника)")
+        return
+
+    min_bet = int(await db.get_setting("duel_min_bet"))
+    max_bet = int(await db.get_setting("duel_max_bet"))
+    currency = await db.get_setting("currency_name")
+    if bet < min_bet or bet > max_bet:
+        await message.reply(f"Ставка должна быть от {min_bet} до {max_bet} {currency}.")
+        return
+
+    await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    await db.ensure_member(opponent.id, opponent.username, opponent.full_name)
+    starting = int(await db.get_setting("starting_balance"))
+    await db.ensure_wallet(message.from_user.id, starting)
+    await db.ensure_wallet(opponent.id, starting)
+
+    initiator_balance = await db.get_balance(message.from_user.id)
+    if initiator_balance < bet:
+        await message.reply(f"Недостаточно средств для такой ставки. Ваш баланс: {initiator_balance} {currency}.")
+        return
+
+    _duel_counter += 1
+    duel_id = _duel_counter
+    _pending_duels[duel_id] = {
+        "initiator_id": message.from_user.id,
+        "target_id": opponent.id,
+        "bet": bet,
+        "chat_id": message.chat.id,
+    }
+
+    timeout = int(await db.get_setting("duel_timeout_sec"))
+    sent = await message.reply(
+        f"⚔️ {await display_mention(message.from_user)} вызывает {await display_mention(opponent)} на дуэль "
+        f"на ставку {bet} {currency}!\n{await display_mention(opponent)}, принимаете вызов?",
+        reply_markup=keyboards.duel_challenge_keyboard(duel_id),
+    )
+    asyncio.create_task(_duel_timeout(sent, duel_id, timeout))
+
+
+async def _duel_timeout(message: Message, duel_id: int, timeout: int):
+    await asyncio.sleep(timeout)
+    if duel_id in _pending_duels:
+        del _pending_duels[duel_id]
+        try:
+            await message.edit_text(message.text + "\n\n⌛ Время на ответ истекло, вызов отменён.", reply_markup=None)
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("duel:"))
+async def on_duel_response(callback: CallbackQuery, bot: Bot):
+    _, action, duel_id_str = callback.data.split(":")
+    duel_id = int(duel_id_str)
+    duel = _pending_duels.get(duel_id)
+
+    if duel is None:
+        await callback.answer("Этот вызов уже неактуален.", show_alert=True)
+        return
+
+    if callback.from_user.id != duel["target_id"]:
+        await callback.answer("Этот вызов адресован не вам.", show_alert=True)
+        return
+
+    currency = await db.get_setting("currency_name")
+
+    if action == "decline":
+        del _pending_duels[duel_id]
+        await callback.message.edit_text(callback.message.text + "\n\n❌ Вызов отклонён.", reply_markup=None)
+        await callback.answer()
+        return
+
+    # action == "accept"
+    bet = duel["bet"]
+    target_balance = await db.get_balance(duel["target_id"])
+    if target_balance < bet:
+        await callback.answer(f"Недостаточно средств для этой ставки (у вас {target_balance} {currency}).", show_alert=True)
+        return
+
+    initiator_balance = await db.get_balance(duel["initiator_id"])
+    if initiator_balance < bet:
+        del _pending_duels[duel_id]
+        await callback.message.edit_text(
+            callback.message.text + "\n\n❌ Вызов отменён: у инициатора больше не хватает средств.", reply_markup=None
+        )
+        await callback.answer()
+        return
+
+    del _pending_duels[duel_id]
+
+    winner_id = random.choice([duel["initiator_id"], duel["target_id"]])
+    loser_id = duel["target_id"] if winner_id == duel["initiator_id"] else duel["initiator_id"]
+
+    await db.add_balance(winner_id, bet, f"duel_win:{duel_id}")
+    await db.add_balance(loser_id, -bet, f"duel_loss:{duel_id}")
+
+    # Реальные User-объекты обеих сторон нужны для корректного тега (учитывая /setname) —
+    # у нас гарантированно есть только callback.from_user (это target), для второй стороны
+    # запрашиваем актуальные данные участника через Bot API.
+    async def _resolve_user(user_id: int):
+        if user_id == callback.from_user.id:
+            return callback.from_user
+        try:
+            member = await bot.get_chat_member(duel["chat_id"], user_id)
+            return member.user
+        except Exception:
+            return None
+
+    winner_user = await _resolve_user(winner_id)
+    loser_user = await _resolve_user(loser_id)
+
+    winner_mention = await display_mention(winner_user) if winner_user else f'<a href="tg://user?id={winner_id}">Победитель</a>'
+    loser_mention = await display_mention(loser_user) if loser_user else f'<a href="tg://user?id={loser_id}">Соперник</a>'
+
+    await db.add_log("duel_result", winner_id, loser_id, f"duel_id={duel_id} bet={bet}")
+
+    await callback.message.edit_text(
+        callback.message.text + f"\n\n⚔️ Дуэль состоялась! Победитель: {winner_mention} (+{bet} {currency}).\n"
+        f"Проигравший: {loser_mention} (-{bet} {currency}).",
+        reply_markup=None,
+    )
+    await callback.answer("Дуэль завершена!")
 
 
 @router.message(Command("shop"))

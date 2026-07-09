@@ -64,6 +64,13 @@ DEFAULT_SETTINGS = {
     "minigames_enabled": "1",
     "dice_min_bet": "5",
     "dice_max_bet": "500",
+    "coinflip_min_bet": "5",
+    "coinflip_max_bet": "500",
+    "slots_min_bet": "5",
+    "slots_max_bet": "300",
+    "duel_min_bet": "5",
+    "duel_max_bet": "1000",
+    "duel_timeout_sec": "300",
     # Лестница наказаний (в секундах, для мутов). После исчерпания списка — бан.
     "punishment_ladder": "300,1800,10800,86400",
 }

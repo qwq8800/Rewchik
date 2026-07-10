@@ -1561,8 +1561,7 @@ async def cmd_duel(message: Message, command: CommandObject):
 
 async def _duel_timeout(message: Message, duel_id: int, timeout: int):
     await asyncio.sleep(timeout)
-    if duel_id in _pending_duels:
-        del _pending_duels[duel_id]
+    if _pending_duels.pop(duel_id, None) is not None:
         try:
             await message.edit_text(message.text + "\n\n⌛ Время на ответ истекло, вызов отменён.", reply_markup=None)
         except Exception:
@@ -1583,31 +1582,40 @@ async def on_duel_response(callback: CallbackQuery, bot: Bot):
         await callback.answer("Этот вызов адресован не вам.", show_alert=True)
         return
 
-    currency = await db.get_setting("currency_name")
+    # Атомарно забираем вызов из ожидания ДО первого await ниже — иначе в узком окне между
+    # этой проверкой и завершением await'ов параллельно может сработать _duel_timeout,
+    # тоже попытаться удалить duel_id и отредактировать то же сообщение (гонка -> KeyError
+    # на повторном del и рассинхронизация текста сообщения).
+    duel = _pending_duels.pop(duel_id, None)
+    if duel is None:
+        await callback.answer("⌛ Время на ответ только что истекло.", show_alert=True)
+        return
 
     if action == "decline":
-        del _pending_duels[duel_id]
         await callback.message.edit_text(callback.message.text + "\n\n❌ Вызов отклонён.", reply_markup=None)
         await callback.answer()
         return
 
     # action == "accept"
+    currency = await db.get_setting("currency_name")
     bet = duel["bet"]
+
     target_balance = await db.get_balance(duel["target_id"])
     if target_balance < bet:
+        await callback.message.edit_text(
+            callback.message.text + f"\n\n❌ Вызов отменён: недостаточно средств у {await display_mention(callback.from_user)}.",
+            reply_markup=None,
+        )
         await callback.answer(f"Недостаточно средств для этой ставки (у вас {target_balance} {currency}).", show_alert=True)
         return
 
     initiator_balance = await db.get_balance(duel["initiator_id"])
     if initiator_balance < bet:
-        del _pending_duels[duel_id]
         await callback.message.edit_text(
             callback.message.text + "\n\n❌ Вызов отменён: у инициатора больше не хватает средств.", reply_markup=None
         )
         await callback.answer()
         return
-
-    del _pending_duels[duel_id]
 
     winner_id = random.choice([duel["initiator_id"], duel["target_id"]])
     loser_id = duel["target_id"] if winner_id == duel["initiator_id"] else duel["initiator_id"]

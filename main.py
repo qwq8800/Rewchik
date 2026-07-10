@@ -10,6 +10,7 @@ import html
 import logging
 import random
 import time
+from collections import deque
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
@@ -42,6 +43,10 @@ _pending_nicknames: dict[int, str] = {}
 # отменяет незавершённые вызовы, деньги при этом не списываются заранее.
 _pending_duels: dict[int, dict] = {}
 _duel_counter = 0
+
+# Метки времени последних вступлений — для детекции рейда (антирейд, раздел 4 ТЗ).
+# Как и антифлуд/антиспам, это "горячие" данные, для одного чата достаточно памяти процесса.
+_recent_joins: deque = deque(maxlen=200)
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +89,8 @@ async def cmd_help(message: Message):
         "/shop — магазин косметических бейджей\n"
         "/buy &lt;код&gt; — купить товар\n"
         "/inventory — ваш инвентарь\n"
-        "/equip &lt;код&gt; — экипировать бейдж (виден в /rank)\n\n"
+        "/equip &lt;код&gt; — экипировать бейдж (виден в /rank)\n"
+        "/pay &lt;сумма&gt; — перевести монеты участнику (ответом на его сообщение)\n\n"
 
         "🎮 <b>Мини-игры</b>\n"
         "/dice &lt;ставка&gt; — кубик, честные 50/50\n"
@@ -104,7 +110,8 @@ async def cmd_help(message: Message):
         "/createrole, /setrole, /removerole — гибкие роли с правами\n"
         "/setflood, /setwelcome, /setwarnexpiry — настройки модерации\n"
         "/addword, /delword, /words — стоп-слова\n"
-        "/adddomain, /deldomain, /domains — чёрный список доменов"
+        "/adddomain, /deldomain, /domains — чёрный список доменов\n"
+        "/lockdown, /unlock — экстренная блокировка чата (антирейд)"
     )
     await message.reply(text)
 
@@ -176,6 +183,45 @@ def _captcha_keyboard(user_id: int, correct: int, options: list[int]):
     return b.as_markup()
 
 
+async def _check_raid(bot: Bot, chat_id: int, chat_title: str):
+    """Считает вступления за скользящее окно; при превышении порога — тревога и,
+    если включено, автоматическая блокировка чата (антирейд, раздел 4 ТЗ)."""
+    if not await db.get_bool_setting("raid_detection_enabled"):
+        return
+    if await db.get_bool_setting("lockdown_active"):
+        return  # уже в блокировке, не спамим повторными тревогами
+
+    window = int(await db.get_setting("raid_window_sec"))
+    threshold = int(await db.get_setting("raid_join_threshold"))
+    now = time.time()
+    while _recent_joins and now - _recent_joins[0] > window:
+        _recent_joins.popleft()
+
+    if len(_recent_joins) < threshold:
+        return
+
+    await db.add_log("raid_detected", 0, None, f"joins={len(_recent_joins)} window={window}s")
+    auto_lockdown = await db.get_bool_setting("raid_auto_lockdown_enabled")
+
+    if auto_lockdown:
+        engaged = await punishments.engage_lockdown(bot, chat_id, "автообнаружение рейда")
+        status_line = (
+            "🔒 Чат автоматически заблокирован (новые сообщения от участников без прав администратора "
+            "запрещены) до команды /unlock."
+            if engaged else "⚠️ Не удалось автоматически заблокировать чат — проверьте права бота."
+        )
+    else:
+        status_line = "Автоблокировка отключена в настройках — при необходимости включите вручную: /lockdown"
+
+    try:
+        await bot.send_message(
+            chat_id,
+            f"🚨 <b>Похоже на рейд</b>: {len(_recent_joins)} новых участников за последние {window} сек.\n{status_line}",
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось отправить тревогу о рейде: {e}")
+
+
 @router.chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
 async def on_member_join(event: ChatMemberUpdated, bot: Bot):
     if not _is_group_chat(event.chat.id):
@@ -184,6 +230,9 @@ async def on_member_join(event: ChatMemberUpdated, bot: Bot):
     user = event.new_chat_member.user
     await db.ensure_member(user.id, user.username, user.full_name)
     await db.add_log("join", user.id, None, "")
+
+    _recent_joins.append(time.time())
+    await _check_raid(bot, event.chat.id, event.chat.title)
 
     if user.is_bot:
         return
@@ -655,6 +704,41 @@ async def cmd_domains(message: Message, bot: Bot):
     await message.reply("🚫 <b>Чёрный список доменов</b>\n\n" + "\n".join(f"• {d}" for d in domains))
 
 
+@router.message(Command("lockdown"))
+async def cmd_lockdown(message: Message, bot: Bot):
+    """Экстренная ручная блокировка чата (например, при рейде, который бот не поймал сам)."""
+    if not _is_group_chat(message.chat.id):
+        return
+    if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
+        await message.reply("⛔ Эта команда доступна только администраторам.")
+        return
+    if await db.get_bool_setting("lockdown_active"):
+        await message.reply("Чат уже заблокирован. Снять блокировку: /unlock")
+        return
+    engaged = await punishments.engage_lockdown(bot, message.chat.id, f"ручная блокировка от {message.from_user.id}")
+    if engaged:
+        await message.reply("🔒 Чат заблокирован: участники без прав администратора не могут писать. Снять: /unlock")
+    else:
+        await message.reply("⚠️ Не удалось заблокировать чат — проверьте, что у бота есть право менять настройки чата.")
+
+
+@router.message(Command("unlock"))
+async def cmd_unlock(message: Message, bot: Bot):
+    if not _is_group_chat(message.chat.id):
+        return
+    if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
+        await message.reply("⛔ Эта команда доступна только администраторам.")
+        return
+    if not await db.get_bool_setting("lockdown_active"):
+        await message.reply("Чат сейчас не заблокирован.")
+        return
+    lifted = await punishments.lift_lockdown(bot, message.chat.id)
+    if lifted:
+        await message.reply("🔓 Блокировка снята, права чата восстановлены.")
+    else:
+        await message.reply("⚠️ Не удалось снять блокировку — проверьте права бота и попробуйте ещё раз.")
+
+
 @router.message(Command("setwarnexpiry"))
 async def cmd_setwarnexpiry(message: Message, bot: Bot, command: CommandObject):
     if not await _require_admin(message, bot):
@@ -1011,6 +1095,63 @@ async def cmd_daily(message: Message):
 
     balance = await db.get_balance(message.from_user.id)
     await message.reply(f"🎁 Ежедневный бонус получен: +{amount} {currency}!\nБаланс: {balance} {currency}")
+
+
+@router.message(Command("pay"))
+async def cmd_pay(message: Message, command: CommandObject):
+    """Перевод монет другому участнику (ответом на его сообщение)."""
+    if not _is_group_chat(message.chat.id):  # получатель должен быть виден в чате
+        return
+    if not await db.get_bool_setting("economy_enabled"):
+        await message.reply("Экономика в этом чате отключена.")
+        return
+    if not message.reply_to_message:
+        await message.reply("ℹ️ Ответьте командой /pay <сумма> на сообщение получателя.")
+        return
+    if not command.args:
+        await message.reply("Использование: /pay <сумма> (ответом на сообщение получателя)")
+        return
+
+    recipient = message.reply_to_message.from_user
+    if recipient.id == message.from_user.id:
+        await message.reply("Нельзя перевести монеты самому себе 🙂")
+        return
+    if recipient.is_bot:
+        await message.reply("Ботам переводить монеты нет смысла 🙂")
+        return
+
+    try:
+        amount = int(command.args.split()[0])
+    except ValueError:
+        await message.reply("Использование: /pay <сумма> (ответом на сообщение получателя)")
+        return
+
+    min_amount = int(await db.get_setting("pay_min_amount"))
+    max_amount = int(await db.get_setting("pay_max_amount"))
+    currency = await db.get_setting("currency_name")
+    if amount < min_amount or amount > max_amount:
+        await message.reply(f"Сумма перевода должна быть от {min_amount} до {max_amount} {currency}.")
+        return
+
+    await db.ensure_member(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    await db.ensure_member(recipient.id, recipient.username, recipient.full_name)
+    starting = int(await db.get_setting("starting_balance"))
+    await db.ensure_wallet(message.from_user.id, starting)
+    await db.ensure_wallet(recipient.id, starting)
+
+    sender_balance = await db.get_balance(message.from_user.id)
+    if sender_balance < amount:
+        await message.reply(f"Недостаточно средств. Ваш баланс: {sender_balance} {currency}.")
+        return
+
+    await db.add_balance(message.from_user.id, -amount, f"pay_to:{recipient.id}")
+    await db.add_balance(recipient.id, amount, f"pay_from:{message.from_user.id}")
+    await db.add_log("pay", recipient.id, message.from_user.id, f"amount={amount}")
+
+    await message.reply(
+        f"💸 {await display_mention(message.from_user)} перевёл(а) {amount} {currency} "
+        f"пользователю {await display_mention(recipient)}."
+    )
 
 
 @router.message(Command("give"))

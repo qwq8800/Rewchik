@@ -144,6 +144,41 @@ async def panel_router(callback: CallbackQuery, bot: Bot):
         )
         await callback.message.edit_text(text, reply_markup=keyboards.back_only_menu())
 
+    elif section == "antiraid":
+        if len(parts) == 2:
+            status = "🔒 Чат ЗАБЛОКИРОВАН" if await db.get_bool_setting("lockdown_active") else "🔓 Чат в обычном режиме"
+            await callback.message.edit_text(
+                f"🚨 <b>Антирейд</b>\n\n{status}", reply_markup=await keyboards.antiraid_menu()
+            )
+        elif parts[2] == "toggle":
+            key = parts[3]
+            current = await db.get_bool_setting(key)
+            await db.set_setting(key, "0" if current else "1")
+            await db.add_log("settings_change", callback.from_user.id, callback.from_user.id, f"{key} -> {not current}")
+            status = "🔒 Чат ЗАБЛОКИРОВАН" if await db.get_bool_setting("lockdown_active") else "🔓 Чат в обычном режиме"
+            await callback.message.edit_text(
+                f"🚨 <b>Антирейд</b>\n\n{status}", reply_markup=await keyboards.antiraid_menu()
+            )
+            await callback.answer("Обновлено ✅")
+        elif parts[2] == "info":
+            await callback.answer(
+                "Изменить порог можно только напрямую в БД (raid_join_threshold, raid_window_sec) — "
+                "или попросите разработчика добавить команду /setraid.",
+                show_alert=True,
+            )
+        elif parts[2] == "lockdown":
+            engaged = await punishments.engage_lockdown(bot, callback.message.chat.id, f"вручную из панели ({callback.from_user.id})")
+            await callback.answer("🔒 Чат заблокирован." if engaged else "⚠️ Не удалось заблокировать чат.", show_alert=True)
+            await callback.message.edit_text(
+                "🚨 <b>Антирейд</b>\n\n🔒 Чат ЗАБЛОКИРОВАН", reply_markup=await keyboards.antiraid_menu()
+            )
+        elif parts[2] == "unlock":
+            lifted = await punishments.lift_lockdown(bot, callback.message.chat.id)
+            await callback.answer("🔓 Блокировка снята." if lifted else "⚠️ Не удалось снять блокировку.", show_alert=True)
+            await callback.message.edit_text(
+                "🚨 <b>Антирейд</b>\n\n🔓 Чат в обычном режиме", reply_markup=await keyboards.antiraid_menu()
+            )
+
     elif section == "economy":
         if len(parts) == 2:
             await callback.message.edit_text(

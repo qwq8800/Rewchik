@@ -62,6 +62,15 @@ DEFAULT_SETTINGS = {
     "nickname_change_cooldown_sec": "172800",  # смена имени — не чаще раза в 2 суток
     "nickname_min_length": "2",
     "nickname_max_length": "32",
+    # --- Антирейд ---
+    "raid_detection_enabled": "1",
+    "raid_join_threshold": "5",          # столько вступлений за окно ниже — считается рейдом
+    "raid_window_sec": "60",
+    "raid_auto_lockdown_enabled": "1",   # при обнаружении рейда автоматически ограничивать чат
+    "lockdown_active": "0",              # текущее состояние блокировки (управляется ботом, не редактируется вручную)
+    "saved_permissions_json": "",        # права чата до блокировки — для восстановления при /unlock
+    "pay_min_amount": "1",
+    "pay_max_amount": "10000",
     "reputation_enabled": "1",
     "reputation_cooldown_sec": "3600",   # раз в сколько времени можно выдать +1 репутации тому же человеку
     # --- Экономика ---

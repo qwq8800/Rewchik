@@ -11,6 +11,7 @@ Punishment Engine — оркестратор наказаний (раздел 5 
 сервис на очередях, здесь — таск в том же процессе).
 """
 import asyncio
+import json
 import time
 import logging
 
@@ -130,3 +131,42 @@ async def kick_user(bot: Bot, chat_id: int, user_id: int, reason: str = "", mode
         logger.warning(f"Не удалось кикнуть {user_id}: {e}")
         return
     await db.add_log("kick", user_id, moderator_id, reason)
+
+
+async def engage_lockdown(bot: Bot, chat_id: int, reason: str) -> bool:
+    """Ограничивает права по умолчанию для ВСЕГО чата (кроме админов) — экстренная мера
+    при обнаружении рейда (раздел 4 ТЗ, антирейд). Сохраняет текущие права чата в settings,
+    чтобы lift_lockdown() мог их восстановить."""
+    if await db.get_bool_setting("lockdown_active"):
+        return False  # уже заблокировано
+    try:
+        chat = await bot.get_chat(chat_id)
+        current_permissions = chat.permissions
+        if current_permissions is not None:
+            await db.set_setting("saved_permissions_json", json.dumps(current_permissions.model_dump()))
+        await bot.set_chat_permissions(chat_id, permissions=MUTED_PERMISSIONS)
+        await db.set_setting("lockdown_active", "1")
+        await db.add_log("lockdown_engaged", 0, None, reason)
+        return True
+    except Exception as e:
+        logger.warning(f"Не удалось включить блокировку чата: {e}")
+        return False
+
+
+async def lift_lockdown(bot: Bot, chat_id: int) -> bool:
+    if not await db.get_bool_setting("lockdown_active"):
+        return False
+    try:
+        saved = await db.get_setting("saved_permissions_json")
+        if saved:
+            permissions = ChatPermissions(**json.loads(saved))
+        else:
+            permissions = UNMUTED_PERMISSIONS
+        await bot.set_chat_permissions(chat_id, permissions=permissions)
+        await db.set_setting("lockdown_active", "0")
+        await db.set_setting("saved_permissions_json", "")
+        await db.add_log("lockdown_lifted", 0, None, "")
+        return True
+    except Exception as e:
+        logger.warning(f"Не удалось снять блокировку чата: {e}")
+        return False

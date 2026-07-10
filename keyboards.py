@@ -20,9 +20,10 @@ def main_menu() -> InlineKeyboardMarkup:
     b.button(text="🛒 Магазин", callback_data="panel:shop")
     b.button(text="🏆 Достижения", callback_data="panel:achievements")
     b.button(text="📊 Статистика", callback_data="panel:stats")
+    b.button(text="🚨 Антирейд", callback_data="panel:antiraid")
     b.button(text="⚙️ Настройки", callback_data="panel:settings")
     b.button(text="❌ Закрыть", callback_data="panel:close")
-    b.adjust(2, 2, 2, 2, 2, 2)
+    b.adjust(2, 2, 2, 2, 2, 2, 1)
     return b.as_markup()
 
 
@@ -68,6 +69,28 @@ def back_only_menu(target: str = "panel:main") -> InlineKeyboardMarkup:
 def roles_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="🔙 Назад", callback_data="panel:main")
+    return b.as_markup()
+
+
+async def antiraid_menu() -> InlineKeyboardMarkup:
+    settings = await db.get_all_settings()
+    b = InlineKeyboardBuilder()
+
+    def onoff(key):
+        return "✅ Вкл" if settings.get(key) == "1" else "⛔ Выкл"
+
+    b.button(text=f"Детекция рейда: {onoff('raid_detection_enabled')}", callback_data="panel:antiraid:toggle:raid_detection_enabled")
+    b.button(text=f"Автоблокировка: {onoff('raid_auto_lockdown_enabled')}", callback_data="panel:antiraid:toggle:raid_auto_lockdown_enabled")
+    b.button(
+        text=f"Порог: {settings.get('raid_join_threshold')} вход. / {settings.get('raid_window_sec')}с",
+        callback_data="panel:antiraid:info",
+    )
+    if settings.get("lockdown_active") == "1":
+        b.button(text="🔓 Снять блокировку сейчас", callback_data="panel:antiraid:unlock")
+    else:
+        b.button(text="🔒 Заблокировать чат сейчас", callback_data="panel:antiraid:lockdown")
+    b.button(text="🔙 Назад", callback_data="panel:main")
+    b.adjust(1)
     return b.as_markup()
 
 

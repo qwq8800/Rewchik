@@ -18,6 +18,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.types import Message, ChatMemberUpdated, CallbackQuery
 from aiogram.types import ChatPermissions
+from aiogram.enums import ContentType
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter, JOIN_TRANSITION, LEAVE_TRANSITION
 
@@ -100,11 +101,13 @@ async def cmd_help(message: Message):
 
         "🛡 <b>Для модераторов</b> (право «moderate» — по умолчанию у роли «модератор»)\n"
         "/warn, /mute [минуты], /unmute — ответом на сообщение нарушителя\n"
+        "/unwarn — снять последнее предупреждение (ответом)\n"
         "/stats — обзор чата (право «view_stats»)\n\n"
 
         "👑 <b>Только для администраторов</b>\n"
         "/settings — кнопочная админ-панель\n"
         "/kick, /ban, /unban — ответом на сообщение (право «kick_ban»)\n"
+        "/clearwarns — снять ВСЕ предупреждения (право «kick_ban»)\n"
         "/promote, /demote — быстрый ярлык для роли «модератор»\n"
         "/give &lt;количество&gt; — выдать монеты участнику\n"
         "/createrole, /setrole, /removerole — гибкие роли с правами\n"
@@ -568,6 +571,32 @@ async def cmd_unmute(message: Message, bot: Bot):
         return
     await punishments.unmute_user(bot, message.chat.id, target.id)
     await message.reply(f"🔊 С {await display_mention(target)} снят мут.")
+
+
+@router.message(Command("unwarn"))
+async def cmd_unwarn(message: Message, bot: Bot):
+    """Снять ОДНО (последнее) предупреждение — точечная отмена ошибочного варна."""
+    target = await _require_permission_and_target(message, bot, "moderate")
+    if not target:
+        return
+    removed = await db.remove_last_warning(target.id)
+    if not removed:
+        await message.reply(f"У {await display_mention(target)} нет активных предупреждений.")
+        return
+    await db.add_log("unwarn", target.id, message.from_user.id, "")
+    remaining = await db.count_active_warnings(target.id)
+    await message.reply(f"✅ С {await display_mention(target)} снято последнее предупреждение. Осталось: {remaining}.")
+
+
+@router.message(Command("clearwarns"))
+async def cmd_clearwarns(message: Message, bot: Bot):
+    """Снять ВСЕ предупреждения разом (только администраторы — более серьёзное действие, чем /unwarn)."""
+    target = await _require_permission_and_target(message, bot, "kick_ban")
+    if not target:
+        return
+    await db.clear_warnings(target.id)
+    await db.add_log("clearwarns", target.id, message.from_user.id, "")
+    await message.reply(f"✅ Все предупреждения {await display_mention(target)} сняты.")
 
 
 @router.message(Command("kick"))
@@ -1588,7 +1617,18 @@ async def _process_engagement(bot: Bot, chat_id: int, user):
             pass
 
 
-@router.message(F.text | F.caption)
+# Типы сообщений, которые реально может отправить участник и которые должны попадать под
+# антифлуд/модерацию. Раньше хендлер слушал только F.text | F.caption, из-за чего спам
+# стикерами, фото и голосовыми без подписи полностью обходил антифлуд — это было дырой.
+# Служебные сообщения (вход/выход участников и т.п.) сюда намеренно не входят.
+MODERATABLE_CONTENT_TYPES = {
+    ContentType.TEXT, ContentType.PHOTO, ContentType.VIDEO, ContentType.ANIMATION,
+    ContentType.STICKER, ContentType.VOICE, ContentType.VIDEO_NOTE, ContentType.DOCUMENT,
+    ContentType.AUDIO, ContentType.CONTACT, ContentType.LOCATION, ContentType.VENUE, ContentType.GAME,
+}
+
+
+@router.message(F.content_type.in_(MODERATABLE_CONTENT_TYPES))
 async def on_message(message: Message, bot: Bot):
     if not _is_group_chat(message.chat.id):
         return
@@ -1646,11 +1686,14 @@ async def on_message(message: Message, bot: Bot):
             bot, message.chat.id, message.from_user.id, final_verdict.module, final_verdict.reason
         )
 
-        notice = {
-            "warn": f"⚠️ {await display_mention(message.from_user)}, предупреждение: {final_verdict.reason}",
-            "mute": f"🔇 {await display_mention(message.from_user)} замучен ({extra // 60} мин.). Причина: {final_verdict.reason}",
-            "ban": f"🚫 {await display_mention(message.from_user)} забанен за повторные нарушения.",
-        }[action]
+        mention = await display_mention(message.from_user)
+        if action == "warn":
+            notice = f"⚠️ {mention}, предупреждение: {final_verdict.reason}"
+        elif action == "mute":
+            notice = f"🔇 {mention} замучен ({extra // 60} мин.). Причина: {final_verdict.reason}"
+        else:  # ban
+            notice = f"🚫 {mention} забанен за повторные нарушения."
+
         try:
             sent = await bot.send_message(message.chat.id, notice)
             await asyncio.sleep(8)

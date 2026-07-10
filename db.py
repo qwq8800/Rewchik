@@ -433,6 +433,24 @@ async def clear_warnings(user_id: int):
     await _conn.commit()
 
 
+async def remove_last_warning(user_id: int) -> bool:
+    """Снимает только САМОЕ ПОСЛЕДНЕЕ активное предупреждение (для /unwarn — точечная
+    отмена ошибочного варна, в отличие от clear_warnings, которая снимает все разом)."""
+    async with _conn.execute(
+        "SELECT id FROM warnings WHERE user_id = ? AND active = 1 ORDER BY created_at DESC LIMIT 1",
+        (user_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return False
+    await _conn.execute("UPDATE warnings SET active = 0 WHERE id = ?", (row[0],))
+    await _conn.execute(
+        "UPDATE members SET warns_count = MAX(0, warns_count - 1) WHERE user_id = ?", (user_id,)
+    )
+    await _conn.commit()
+    return True
+
+
 # ---------- LOGS ----------
 
 async def add_log(action: str, user_id: int, moderator_id: Optional[int], details: str = ""):

@@ -662,9 +662,13 @@ async def list_all_pending_captcha():
         return await cur.fetchall()
 
 
-async def remove_pending_captcha(user_id: int):
-    await _conn.execute("DELETE FROM pending_captcha WHERE user_id = ?", (user_id,))
+async def remove_pending_captcha(user_id: int) -> bool:
+    """Возвращает True, если запись реально была удалена именно этим вызовом — используется
+    как атомарный 'захват' капчи, чтобы одновременные /verify и таймаут-кик не сработали оба разом
+    (DELETE в SQLite выполняется одной атомарной операцией без промежуточных await)."""
+    cur = await _conn.execute("DELETE FROM pending_captcha WHERE user_id = ?", (user_id,))
     await _conn.commit()
+    return cur.rowcount > 0
 
 
 # ---------- STATS OVERVIEW ----------

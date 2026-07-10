@@ -297,10 +297,9 @@ async def on_member_join(event: ChatMemberUpdated, bot: Bot):
 
 async def _captcha_timeout_kick(bot: Bot, chat_id: int, user_id: int, captcha_message_id: int, timeout: int):
     await asyncio.sleep(timeout)
-    pending = await db.get_pending_captcha(user_id)
-    if pending is None:
-        return  # уже прошёл капчу
-    await db.remove_pending_captcha(user_id)
+    claimed = await db.remove_pending_captcha(user_id)
+    if not claimed:
+        return  # уже прошёл капчу (или уже кикнут кем-то другим) — этот вызов опоздал
     try:
         await bot.delete_message(chat_id, captcha_message_id)
     except Exception:
@@ -333,7 +332,15 @@ async def on_captcha_answer(callback: CallbackQuery, bot: Bot):
         await callback.answer("❌ Неверно, попробуйте ещё раз или дождитесь новой капчи.", show_alert=True)
         return
 
-    await db.remove_pending_captcha(target_user_id)
+    # Атомарно "забираем" капчу ДО дальнейших await — иначе в узком окне между проверкой выше
+    # и этим моментом параллельно может успеть сработать _captcha_timeout_kick (тот же принцип,
+    # что и в /duel): без этого пользователя, правильно ответившего впритык к таймауту, могло бы
+    # и кикнуть, и одновременно пустить в чат.
+    claimed = await db.remove_pending_captcha(target_user_id)
+    if not claimed:
+        await callback.answer("⌛ Время на ответ только что истекло.", show_alert=True)
+        return
+
     try:
         await bot.restrict_chat_member(chat_id, target_user_id, permissions=FULL_PERMISSIONS)
     except Exception as e:

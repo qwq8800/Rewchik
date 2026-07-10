@@ -61,7 +61,10 @@ async def cmd_start(message: Message):
         "👋 Привет! Я бот чата @RewchikChat.\n\n"
         "📋 Полный список команд: /help\n"
         "📜 Правила чата: /rules\n\n"
-        "Модерация и админ-функции работают только в самой группе @RewchikChat."
+        "Прямо здесь, в личных сообщениях, уже доступны: свой профиль (/rank), топы (/top), "
+        "экономика (/balance, /daily, /shop) и мини-игры (/dice, /coinflip, /slots).\n"
+        "Модерация и команды, требующие второго участника (/pay, /duel, /warn и т.д.), "
+        "работают только в самой группе @RewchikChat."
     )
 
 
@@ -148,6 +151,19 @@ def _is_group_chat(chat_id: int) -> bool:
     вход/выход участников, админ-команды (используют bot.get_chat_member, что не имеет
     смысла в личных сообщениях)."""
     return chat_id == config.ALLOWED_CHAT_ID
+
+
+async def _require_group_chat(message: Message) -> bool:
+    """Как _is_group_chat, но при вызове из личных сообщений вежливо объясняет, что команда
+    работает только в группе, вместо молчаливого игнорирования (которое выглядит как баг)."""
+    if _is_group_chat(message.chat.id):
+        return True
+    if message.chat.id > 0:  # личный чат с ботом
+        await message.reply(
+            f"ℹ️ Эта команда работает только в группе @{config.ALLOWED_CHAT_USERNAME}, "
+            f"а не в личных сообщениях. Список того, что доступно в ЛС: /help"
+        )
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +383,7 @@ async def on_member_leave(event: ChatMemberUpdated, bot: Bot):
 
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, bot: Bot):
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return
     if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
@@ -392,7 +408,7 @@ async def cmd_rules(message: Message):
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, bot: Bot):
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return
     if not await _has_permission(bot, message.chat.id, message.from_user.id, "view_stats"):
         await message.reply("⛔ Статистика доступна администраторам и ролям с правом «Смотреть статистику».")
@@ -411,7 +427,7 @@ async def cmd_stats(message: Message, bot: Bot):
 @router.message(Command("whois"))
 async def cmd_whois(message: Message, bot: Bot):
     """Полный профиль участника для модерации (ответом на его сообщение)."""
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return
     if not await _has_permission(bot, message.chat.id, message.from_user.id, "view_stats"):
         await message.reply("⛔ Эта команда доступна администраторам и ролям с правом «Смотреть статистику».")
@@ -493,7 +509,7 @@ async def cmd_exportlogs(message: Message, bot: Bot, command: CommandObject):
 @router.message(Command("report"))
 async def cmd_report(message: Message, bot: Bot, command: CommandObject):
     """Жалоба участника на сообщение (ответом). Уведомляет админов/модераторов кнопками для быстрой реакции."""
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return
     if not message.reply_to_message:
         await message.reply("ℹ️ Ответьте командой /report на проблемное сообщение.")
@@ -547,7 +563,7 @@ async def cmd_report(message: Message, bot: Bot, command: CommandObject):
 # ---------------------------------------------------------------------------
 
 async def _require_admin_and_target(message: Message, bot: Bot):
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return None
     if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
@@ -601,7 +617,7 @@ async def _has_permission(bot: Bot, chat_id: int, user_id: int, permission: str)
 
 async def _require_permission_and_target(message: Message, bot: Bot, permission: str):
     """Как _require_admin_and_target, но пропускает любого, у чьей роли есть указанное право."""
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return None
     if not await _has_permission(bot, message.chat.id, message.from_user.id, permission):
         await message.reply(f"⛔ Для этой команды нужно право «{config.PERMISSIONS.get(permission, permission)}».")
@@ -614,7 +630,7 @@ async def _require_permission_and_target(message: Message, bot: Bot, permission:
 
 async def _require_permission(message: Message, bot: Bot, permission: str) -> bool:
     """Проверка права без цели (для команд настройки чата)."""
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return False
     if not await _has_permission(bot, message.chat.id, message.from_user.id, permission):
         await message.reply(f"⛔ Для этой команды нужно право «{config.PERMISSIONS.get(permission, permission)}».")
@@ -859,7 +875,7 @@ async def cmd_domains(message: Message, bot: Bot):
 @router.message(Command("lockdown"))
 async def cmd_lockdown(message: Message, bot: Bot):
     """Экстренная ручная блокировка чата (например, при рейде, который бот не поймал сам)."""
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return
     if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
@@ -876,7 +892,7 @@ async def cmd_lockdown(message: Message, bot: Bot):
 
 @router.message(Command("unlock"))
 async def cmd_unlock(message: Message, bot: Bot):
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return
     if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
@@ -1058,7 +1074,7 @@ async def cmd_mods(message: Message):
 async def cmd_createrole(message: Message, bot: Bot, command: CommandObject):
     """Создать/обновить кастомную роль с произвольным набором прав (только реальные админы).
     Использование: /createrole <ключ> <название>; <право1,право2,...>"""
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return
     if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
@@ -1106,7 +1122,7 @@ async def cmd_roles(message: Message):
 @router.message(Command("setrole"))
 async def cmd_setrole(message: Message, bot: Bot, command: CommandObject):
     """Назначить участнику любую из созданных кастомных ролей (только реальные админы)."""
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return
     if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
@@ -1133,7 +1149,7 @@ async def cmd_setrole(message: Message, bot: Bot, command: CommandObject):
 
 @router.message(Command("removerole"))
 async def cmd_removerole(message: Message, bot: Bot):
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return
     if not await _is_full_admin(bot, message.chat.id, message.from_user.id):
         await message.reply("⛔ Эта команда доступна только администраторам.")
@@ -1252,7 +1268,7 @@ async def cmd_daily(message: Message):
 @router.message(Command("pay"))
 async def cmd_pay(message: Message, command: CommandObject):
     """Перевод монет другому участнику (ответом на его сообщение)."""
-    if not _is_group_chat(message.chat.id):  # получатель должен быть виден в чате
+    if not await _require_group_chat(message):  # получатель должен быть виден в чате
         return
     if not await db.get_bool_setting("economy_enabled"):
         await message.reply("Экономика в этом чате отключена.")
@@ -1481,7 +1497,7 @@ async def cmd_duel(message: Message, command: CommandObject):
     Требует подтверждения от соперника кнопкой — деньги списываются только после его согласия."""
     global _duel_counter
 
-    if not _is_group_chat(message.chat.id):  # дуэль — только в группе, второй игрок должен быть виден в чате
+    if not await _require_group_chat(message):  # дуэль — только в группе, второй игрок должен быть виден в чате
         return
     if not await db.get_bool_setting("economy_enabled") or not await db.get_bool_setting("minigames_enabled"):
         await message.reply("Мини-игры сейчас отключены.")
@@ -1753,7 +1769,7 @@ MODERATABLE_CONTENT_TYPES = {
 
 @router.message(F.content_type.in_(MODERATABLE_CONTENT_TYPES))
 async def on_message(message: Message, bot: Bot):
-    if not _is_group_chat(message.chat.id):
+    if not await _require_group_chat(message):
         return
     if message.from_user.is_bot:
         return

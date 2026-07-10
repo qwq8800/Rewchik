@@ -116,6 +116,7 @@ async def cmd_help(message: Message):
         "/addword, /delword, /words — стоп-слова\n"
         "/adddomain, /deldomain, /domains — чёрный список доменов\n"
         "/lockdown, /unlock — экстренная блокировка чата (антирейд)\n"
+        "/pin, /unpin — закрепить/открепить сообщение (право «manage_settings»)\n"
         "/exportlogs [N] — выгрузить последние N записей лога файлом (право «manage_settings»)"
     )
     await message.reply(text)
@@ -681,6 +682,44 @@ async def cmd_clearwarns(message: Message, bot: Bot):
     await db.clear_warnings(target.id)
     await db.add_log("clearwarns", target.id, message.from_user.id, "")
     await message.reply(f"✅ Все предупреждения {await display_mention(target)} сняты.")
+
+
+@router.message(Command("pin"))
+async def cmd_pin(message: Message, bot: Bot, command: CommandObject):
+    """Закрепить сообщение (ответом). silent — необязательный аргумент, чтобы не уведомлять участников."""
+    if not await _require_permission(message, bot, "manage_settings"):
+        return
+    if not message.reply_to_message:
+        await message.reply("ℹ️ Ответьте командой /pin на сообщение, которое нужно закрепить. "
+                             "Добавьте «silent», чтобы не уведомлять участников.")
+        return
+    silent = bool(command.args and "silent" in command.args.lower())
+    try:
+        await bot.pin_chat_message(
+            message.chat.id, message.reply_to_message.message_id, disable_notification=silent
+        )
+        await db.add_log("pin", message.reply_to_message.from_user.id, message.from_user.id, "")
+        await message.reply("📌 Сообщение закреплено.")
+    except Exception as e:
+        await message.reply(f"⚠️ Не удалось закрепить сообщение: у бота есть право «Закрепление сообщений»?")
+        logger.warning(f"Не удалось закрепить сообщение: {e}")
+
+
+@router.message(Command("unpin"))
+async def cmd_unpin(message: Message, bot: Bot):
+    """Открепить сообщение: ответом на конкретное закреплённое, либо без ответа — открепить последнее."""
+    if not await _require_permission(message, bot, "manage_settings"):
+        return
+    try:
+        if message.reply_to_message:
+            await bot.unpin_chat_message(message.chat.id, message.reply_to_message.message_id)
+        else:
+            await bot.unpin_chat_message(message.chat.id)
+        await db.add_log("unpin", 0, message.from_user.id, "")
+        await message.reply("📌 Сообщение откреплено.")
+    except Exception as e:
+        await message.reply("⚠️ Не удалось открепить сообщение (возможно, закреплённых сообщений нет).")
+        logger.warning(f"Не удалось открепить сообщение: {e}")
 
 
 @router.message(Command("kick"))

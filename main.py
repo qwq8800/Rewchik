@@ -16,7 +16,7 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart, CommandObject
-from aiogram.types import Message, ChatMemberUpdated, CallbackQuery
+from aiogram.types import Message, ChatMemberUpdated, CallbackQuery, BufferedInputFile
 from aiogram.types import ChatPermissions
 from aiogram.enums import ContentType
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -102,6 +102,7 @@ async def cmd_help(message: Message):
         "🛡 <b>Для модераторов</b> (право «moderate» — по умолчанию у роли «модератор»)\n"
         "/warn, /mute [минуты], /unmute — ответом на сообщение нарушителя\n"
         "/unwarn — снять последнее предупреждение (ответом)\n"
+        "/whois — полный профиль участника (ответом)\n"
         "/stats — обзор чата (право «view_stats»)\n\n"
 
         "👑 <b>Только для администраторов</b>\n"
@@ -114,7 +115,8 @@ async def cmd_help(message: Message):
         "/setflood, /setwelcome, /setwarnexpiry — настройки модерации\n"
         "/addword, /delword, /words — стоп-слова\n"
         "/adddomain, /deldomain, /domains — чёрный список доменов\n"
-        "/lockdown, /unlock — экстренная блокировка чата (антирейд)"
+        "/lockdown, /unlock — экстренная блокировка чата (антирейд)\n"
+        "/exportlogs [N] — выгрузить последние N записей лога файлом (право «manage_settings»)"
     )
     await message.reply(text)
 
@@ -403,6 +405,88 @@ async def cmd_stats(message: Message, bot: Bot):
         f"💬 Всего сообщений учтено: {o['total_messages']}\n"
         f"⚠️ Нарушений за 24 часа: {o['violations_24h']}"
     )
+
+
+@router.message(Command("whois"))
+async def cmd_whois(message: Message, bot: Bot):
+    """Полный профиль участника для модерации (ответом на его сообщение)."""
+    if not _is_group_chat(message.chat.id):
+        return
+    if not await _has_permission(bot, message.chat.id, message.from_user.id, "view_stats"):
+        await message.reply("⛔ Эта команда доступна администраторам и ролям с правом «Смотреть статистику».")
+        return
+    if not message.reply_to_message:
+        await message.reply("ℹ️ Ответьте командой /whois на сообщение участника.")
+        return
+
+    target = message.reply_to_message.from_user
+    await db.ensure_member(target.id, target.username, target.full_name)
+    m = await db.get_member(target.id)
+
+    role_key = await db.get_role(target.id)
+    role_title = "—"
+    if role_key:
+        role = await db.get_custom_role(role_key)
+        role_title = role["title"] if role else role_key
+
+    rep = await db.get_reputation(target.id)
+    joined = time.strftime("%d.%m.%Y", time.localtime(m["joined_at"])) if m["joined_at"] else "неизвестно"
+    active_warns = await db.count_active_warnings(target.id)
+
+    if m["is_banned"]:
+        status = "🚫 забанен"
+    elif m["is_muted"]:
+        remaining = max(0, m["muted_until"] - int(time.time()))
+        status = f"🔇 замучен ещё {remaining // 60} мин."
+    else:
+        status = "✅ обычный статус"
+
+    lines = [
+        f"🔍 <b>Профиль</b>: {await display_mention(target)}",
+        f"ID: <code>{target.id}</code>",
+        f"В чате с: {joined}",
+        f"Уровень: {m['level']} (XP {m['xp']})",
+        f"Сообщений: {m['message_count']}",
+        f"Активных предупреждений: {active_warns} (всего за всё время: {m['warns_count']})",
+        f"Репутация: {rep}",
+        f"Роль: {role_title}",
+        f"Статус: {status}",
+    ]
+    if await db.get_bool_setting("economy_enabled"):
+        balance = await db.get_balance(target.id)
+        currency = await db.get_setting("currency_name")
+        lines.append(f"Баланс: {balance} {currency}")
+
+    await message.reply("\n".join(lines))
+
+
+@router.message(Command("exportlogs"))
+async def cmd_exportlogs(message: Message, bot: Bot, command: CommandObject):
+    """Выгрузить последние N записей лога файлом .txt (раздел «Прозрачность» ТЗ)."""
+    if not await _require_permission(message, bot, "manage_settings"):
+        return
+
+    limit = 200
+    if command.args:
+        try:
+            limit = min(2000, max(1, int(command.args.split()[0])))
+        except ValueError:
+            pass
+
+    rows = await db.get_logs(limit=limit, offset=0)
+    if not rows:
+        await message.reply("Логов пока нет.")
+        return
+
+    lines = []
+    for r in reversed(rows):  # от старых к новым — удобнее читать как хронологию
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"]))
+        lines.append(f"[{ts}] {r['action']} | user={r['user_id']} | moderator={r['moderator_id']} | {r['details']}")
+
+    content = "\n".join(lines)
+    filename = f"rewchik_logs_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+    doc = BufferedInputFile(content.encode("utf-8"), filename=filename)
+    await message.reply_document(doc, caption=f"📄 Экспорт логов: {len(rows)} записей.")
 
 
 @router.message(Command("report"))

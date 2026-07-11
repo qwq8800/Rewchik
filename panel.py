@@ -13,6 +13,7 @@ import db
 import config
 import keyboards
 import punishments
+import giveaways
 
 router = Router(name="panel")
 
@@ -178,6 +179,19 @@ async def panel_router(callback: CallbackQuery, bot: Bot):
             await callback.message.edit_text(
                 "🚨 <b>Антирейд</b>\n\n🔓 Чат в обычном режиме", reply_markup=await keyboards.antiraid_menu()
             )
+
+    elif section == "giveaways":
+        rows = await db.list_active_giveaways()
+        text = await _render_giveaways_text(rows)
+        await callback.message.edit_text(text, reply_markup=keyboards.giveaways_panel_list(rows))
+
+    elif section == "giveaway_end":
+        giveaway_id = int(parts[2])
+        finished = await giveaways.finish_giveaway(bot, giveaway_id)
+        await callback.answer("✅ Розыгрыш завершён." if finished else "Этот розыгрыш уже неактивен.", show_alert=True)
+        rows = await db.list_active_giveaways()
+        text = await _render_giveaways_text(rows)
+        await callback.message.edit_text(text, reply_markup=keyboards.giveaways_panel_list(rows))
 
     elif section == "economy":
         if len(parts) == 2:
@@ -347,3 +361,15 @@ async def report_action_router(callback: CallbackQuery, bot: Bot):
         await callback.message.edit_text(callback.message.text + "\n\n❌ Жалоба отклонена.", reply_markup=None)
 
     await callback.answer("Готово ✅")
+
+
+async def _render_giveaways_text(rows) -> str:
+    if not rows:
+        return "🎉 <b>Розыгрыши</b>\n\nАктивных розыгрышей нет.\n\nЗапустить: /giveaway <минут> <приз> в чате."
+    now = int(time.time())
+    lines = ["🎉 <b>Активные розыгрыши</b>", ""]
+    for g in rows:
+        count = await db.count_giveaway_participants(g["id"])
+        remaining_min = max(0, (g["ends_at"] - now) // 60)
+        lines.append(f"#{g['id']} — {g['prize']} — участников: {count}, осталось ~{remaining_min} мин.")
+    return "\n".join(lines)

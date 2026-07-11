@@ -21,9 +21,10 @@ def main_menu() -> InlineKeyboardMarkup:
     b.button(text="🏆 Достижения", callback_data="panel:achievements")
     b.button(text="📊 Статистика", callback_data="panel:stats")
     b.button(text="🚨 Антирейд", callback_data="panel:antiraid")
+    b.button(text="🎉 Розыгрыши", callback_data="panel:giveaways")
     b.button(text="⚙️ Настройки", callback_data="panel:settings")
     b.button(text="❌ Закрыть", callback_data="panel:close")
-    b.adjust(2, 2, 2, 2, 2, 2, 1)
+    b.adjust(2, 2, 2, 2, 2, 2, 2)
     return b.as_markup()
 
 
@@ -184,6 +185,15 @@ def duel_challenge_keyboard(duel_id: int) -> InlineKeyboardMarkup:
 def giveaway_keyboard(giveaway_id: int, participants_count: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text=f"🎉 Участвовать ({participants_count})", callback_data=f"giveaway:join:{giveaway_id}")
+    return b.as_markup()
+
+
+def giveaways_panel_list(rows) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for g in rows:
+        b.button(text=f"🏁 Завершить #{g['id']}", callback_data=f"panel:giveaway_end:{g['id']}")
+    b.adjust(1)
+    b.row(InlineKeyboardButton(text="🔙 Назад", callback_data="panel:main"))
     return b.as_markup()
 
 

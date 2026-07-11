@@ -26,6 +26,7 @@ import config
 import db
 import moderation
 import punishments
+import giveaways
 import keyboards
 from panel import router as panel_router
 
@@ -752,42 +753,9 @@ async def cmd_unpin(message: Message, bot: Bot):
 # Розыгрыши
 # ---------------------------------------------------------------------------
 
-async def _finish_giveaway(bot: Bot, giveaway_id: int):
-    """Завершает розыгрыш: выбирает случайного победителя (если есть участники) и объявляет
-    результат. Общая логика для автозавершения по таймеру и ручного /endgiveaway."""
-    giveaway = await db.get_giveaway(giveaway_id)
-    if giveaway is None or giveaway["status"] != "active":
-        return
-
-    winner_id = await db.pick_random_giveaway_winner(giveaway_id)
-    await db.finish_giveaway(giveaway_id, winner_id)
-    await db.add_log("giveaway_finished", winner_id or 0, None, f"giveaway_id={giveaway_id}")
-
-    if winner_id is None:
-        text = f"🎉 <b>Розыгрыш завершён</b>\nПриз: {giveaway['prize']}\n\nК сожалению, никто не участвовал."
-    else:
-        try:
-            member = await bot.get_chat_member(giveaway["chat_id"], winner_id)
-            winner_mention = await display_mention(member.user)
-        except Exception:
-            winner_mention = f'<a href="tg://user?id={winner_id}">Победитель</a>'
-        text = f"🎉 <b>Розыгрыш завершён!</b>\nПриз: {giveaway['prize']}\n\nПобедитель: {winner_mention}! Поздравляем 🎊"
-
-    try:
-        if giveaway["message_id"]:
-            await bot.edit_message_text(text, chat_id=giveaway["chat_id"], message_id=giveaway["message_id"])
-        else:
-            await bot.send_message(giveaway["chat_id"], text)
-    except Exception:
-        try:
-            await bot.send_message(giveaway["chat_id"], text)
-        except Exception as e:
-            logger.warning(f"Не удалось объявить результат розыгрыша: {e}")
-
-
 async def _giveaway_auto_finish(bot: Bot, giveaway_id: int, delay_sec: int):
     await asyncio.sleep(delay_sec)
-    await _finish_giveaway(bot, giveaway_id)
+    await giveaways.finish_giveaway(bot, giveaway_id)
 
 
 @router.message(Command("giveaway"))
@@ -869,7 +837,7 @@ async def cmd_endgiveaway(message: Message, bot: Bot, command: CommandObject):
         await message.reply("Такого активного розыгрыша нет.")
         return
 
-    await _finish_giveaway(bot, giveaway_id)
+    await giveaways.finish_giveaway(bot, giveaway_id)
     await message.reply("✅ Розыгрыш завершён досрочно.")
 
 
@@ -2046,7 +2014,7 @@ async def _reconcile_after_restart(bot: Bot):
     for g in giveaways_list:
         remaining = g["ends_at"] - now
         if remaining <= 0:
-            await _finish_giveaway(bot, g["id"])
+            await giveaways.finish_giveaway(bot, g["id"])
         else:
             asyncio.create_task(_giveaway_auto_finish(bot, g["id"], remaining))
 

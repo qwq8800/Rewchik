@@ -154,6 +154,25 @@ CREATE TABLE IF NOT EXISTS reports (
     resolved_by INTEGER,
     resolved_at INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS giveaways (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER,
+    message_id INTEGER,
+    prize TEXT,
+    created_by INTEGER,
+    created_at INTEGER,
+    ends_at INTEGER,
+    status TEXT DEFAULT 'active',
+    winner_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS giveaway_participants (
+    giveaway_id INTEGER,
+    user_id INTEGER,
+    joined_at INTEGER,
+    PRIMARY KEY (giveaway_id, user_id)
+);
 """
 
 _conn: Optional[aiosqlite.Connection] = None
@@ -945,4 +964,79 @@ async def resolve_report(report_id: int, status: str, resolved_by: int):
         "UPDATE reports SET status = ?, resolved_by = ?, resolved_at = ? WHERE id = ?",
         (status, resolved_by, int(time.time()), report_id),
     )
+    await _conn.commit()
+
+
+# ---------- GIVEAWAYS (розыгрыши) ----------
+
+async def create_giveaway(chat_id: int, prize: str, created_by: int, ends_at: int) -> int:
+    cur = await _conn.execute(
+        "INSERT INTO giveaways (chat_id, message_id, prize, created_by, created_at, ends_at, status) "
+        "VALUES (?, 0, ?, ?, ?, ?, 'active')",
+        (chat_id, prize, created_by, int(time.time()), ends_at),
+    )
+    await _conn.commit()
+    return cur.lastrowid
+
+
+async def set_giveaway_message_id(giveaway_id: int, message_id: int):
+    await _conn.execute("UPDATE giveaways SET message_id = ? WHERE id = ?", (message_id, giveaway_id))
+    await _conn.commit()
+
+
+async def get_giveaway(giveaway_id: int):
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute("SELECT * FROM giveaways WHERE id = ?", (giveaway_id,)) as cur:
+        return await cur.fetchone()
+
+
+async def list_active_giveaways():
+    """Используется для восстановления таймеров розыгрышей при старте бота после рестарта."""
+    _conn.row_factory = aiosqlite.Row
+    async with _conn.execute("SELECT * FROM giveaways WHERE status = 'active'") as cur:
+        return await cur.fetchall()
+
+
+async def join_giveaway(giveaway_id: int, user_id: int) -> bool:
+    """Возвращает True, если участник присоединился впервые (False — уже участвовал)."""
+    try:
+        await _conn.execute(
+            "INSERT INTO giveaway_participants (giveaway_id, user_id, joined_at) VALUES (?, ?, ?)",
+            (giveaway_id, user_id, int(time.time())),
+        )
+        await _conn.commit()
+        return True
+    except aiosqlite.IntegrityError:
+        return False  # уже участвует (PRIMARY KEY конфликт)
+
+
+async def count_giveaway_participants(giveaway_id: int) -> int:
+    async with _conn.execute(
+        "SELECT COUNT(*) FROM giveaway_participants WHERE giveaway_id = ?", (giveaway_id,)
+    ) as cur:
+        row = await cur.fetchone()
+        return row[0]
+
+
+async def pick_random_giveaway_winner(giveaway_id: int):
+    """Возвращает user_id случайного участника или None, если участников нет.
+    Выбор делается на стороне SQLite (ORDER BY RANDOM()), а не в Python, чтобы не тянуть
+    в память потенциально большой список участников ради одного случайного значения."""
+    async with _conn.execute(
+        "SELECT user_id FROM giveaway_participants WHERE giveaway_id = ? ORDER BY RANDOM() LIMIT 1",
+        (giveaway_id,),
+    ) as cur:
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+
+async def finish_giveaway(giveaway_id: int, winner_id: int = None):
+    await _conn.execute(
+        "UPDATE giveaways SET status = 'finished', winner_id = ? WHERE id = ?", (winner_id, giveaway_id)
+    )
+    await _conn.commit()
+
+
+async def cancel_giveaway(giveaway_id: int):
+    await _conn.execute("UPDATE giveaways SET status = 'cancelled' WHERE id = ?", (giveaway_id,))
     await _conn.commit()

@@ -181,6 +181,12 @@ def duel_challenge_keyboard(duel_id: int) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
+def giveaway_keyboard(giveaway_id: int, participants_count: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text=f"🎉 Участвовать ({participants_count})", callback_data=f"giveaway:join:{giveaway_id}")
+    return b.as_markup()
+
+
 def report_action_keyboard(report_id: int) -> InlineKeyboardMarkup:
     """Кнопки прямо под уведомлением о жалобе в чате — для быстрой реакции админа/модератора."""
     b = InlineKeyboardBuilder()

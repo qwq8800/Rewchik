@@ -71,6 +71,7 @@ DEFAULT_SETTINGS = {
     "saved_permissions_json": "",        # права чата до блокировки — для восстановления при /unlock
     "pay_min_amount": "1",
     "pay_max_amount": "10000",
+    "giveaway_max_duration_min": "1440",  # максимум 24 часа
     "reputation_enabled": "1",
     "reputation_cooldown_sec": "3600",   # раз в сколько времени можно выдать +1 репутации тому же человеку
     # --- Экономика ---

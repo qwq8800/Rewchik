@@ -120,6 +120,9 @@ async def cmd_help(message: Message):
         "/adddomain, /deldomain, /domains — чёрный список доменов\n"
         "/lockdown, /unlock — экстренная блокировка чата (антирейд)\n"
         "/pin, /unpin — закрепить/открепить сообщение (право «manage_settings»)\n"
+        "/giveaway &lt;минут&gt; &lt;приз&gt; — запустить розыгрыш (право «manage_settings»)\n"
+        "/endgiveaway &lt;id&gt; — завершить розыгрыш досрочно\n"
+        "/giveaways — список активных розыгрышей\n"
         "/exportlogs [N] — выгрузить последние N записей лога файлом (право «manage_settings»)"
     )
     await message.reply(text)
@@ -743,6 +746,148 @@ async def cmd_unpin(message: Message, bot: Bot):
     except Exception as e:
         await message.reply("⚠️ Не удалось открепить сообщение (возможно, закреплённых сообщений нет).")
         logger.warning(f"Не удалось открепить сообщение: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Розыгрыши
+# ---------------------------------------------------------------------------
+
+async def _finish_giveaway(bot: Bot, giveaway_id: int):
+    """Завершает розыгрыш: выбирает случайного победителя (если есть участники) и объявляет
+    результат. Общая логика для автозавершения по таймеру и ручного /endgiveaway."""
+    giveaway = await db.get_giveaway(giveaway_id)
+    if giveaway is None or giveaway["status"] != "active":
+        return
+
+    winner_id = await db.pick_random_giveaway_winner(giveaway_id)
+    await db.finish_giveaway(giveaway_id, winner_id)
+    await db.add_log("giveaway_finished", winner_id or 0, None, f"giveaway_id={giveaway_id}")
+
+    if winner_id is None:
+        text = f"🎉 <b>Розыгрыш завершён</b>\nПриз: {giveaway['prize']}\n\nК сожалению, никто не участвовал."
+    else:
+        try:
+            member = await bot.get_chat_member(giveaway["chat_id"], winner_id)
+            winner_mention = await display_mention(member.user)
+        except Exception:
+            winner_mention = f'<a href="tg://user?id={winner_id}">Победитель</a>'
+        text = f"🎉 <b>Розыгрыш завершён!</b>\nПриз: {giveaway['prize']}\n\nПобедитель: {winner_mention}! Поздравляем 🎊"
+
+    try:
+        if giveaway["message_id"]:
+            await bot.edit_message_text(text, chat_id=giveaway["chat_id"], message_id=giveaway["message_id"])
+        else:
+            await bot.send_message(giveaway["chat_id"], text)
+    except Exception:
+        try:
+            await bot.send_message(giveaway["chat_id"], text)
+        except Exception as e:
+            logger.warning(f"Не удалось объявить результат розыгрыша: {e}")
+
+
+async def _giveaway_auto_finish(bot: Bot, giveaway_id: int, delay_sec: int):
+    await asyncio.sleep(delay_sec)
+    await _finish_giveaway(bot, giveaway_id)
+
+
+@router.message(Command("giveaway"))
+async def cmd_giveaway(message: Message, bot: Bot, command: CommandObject):
+    """Запустить розыгрыш: /giveaway <минут> <приз>. Участники нажимают кнопку, победитель
+    выбирается случайно по истечении времени."""
+    if not await _require_permission(message, bot, "manage_settings"):
+        return
+    if not command.args or len(command.args.split(maxsplit=1)) < 2:
+        await message.reply("Использование: /giveaway <минут> <приз>\nНапример: /giveaway 60 Telegram Premium на месяц")
+        return
+
+    minutes_str, prize = command.args.split(maxsplit=1)
+    try:
+        minutes = int(minutes_str)
+    except ValueError:
+        await message.reply("Использование: /giveaway <минут> <приз>")
+        return
+
+    max_duration = int(await db.get_setting("giveaway_max_duration_min"))
+    if minutes <= 0 or minutes > max_duration:
+        await message.reply(f"Длительность розыгрыша должна быть от 1 до {max_duration} минут.")
+        return
+
+    ends_at = int(time.time()) + minutes * 60
+    giveaway_id = await db.create_giveaway(message.chat.id, prize, message.from_user.id, ends_at)
+
+    text = (
+        f"🎉 <b>Розыгрыш!</b>\nПриз: {prize}\n"
+        f"Завершится через {minutes} мин.\nУчастников: 0"
+    )
+    sent = await message.answer(text, reply_markup=keyboards.giveaway_keyboard(giveaway_id, 0))
+    await db.set_giveaway_message_id(giveaway_id, sent.message_id)
+    await db.add_log("giveaway_started", 0, message.from_user.id, f"giveaway_id={giveaway_id} prize={prize}")
+
+    asyncio.create_task(_giveaway_auto_finish(bot, giveaway_id, minutes * 60))
+
+
+@router.callback_query(F.data.startswith("giveaway:join:"))
+async def on_giveaway_join(callback: CallbackQuery):
+    giveaway_id = int(callback.data.split(":")[2])
+    giveaway = await db.get_giveaway(giveaway_id)
+
+    if giveaway is None or giveaway["status"] != "active":
+        await callback.answer("Этот розыгрыш уже завершён.", show_alert=True)
+        return
+
+    await db.ensure_member(callback.from_user.id, callback.from_user.username, callback.from_user.full_name)
+    joined = await db.join_giveaway(giveaway_id, callback.from_user.id)
+    count = await db.count_giveaway_participants(giveaway_id)
+
+    if joined:
+        await callback.answer("🎉 Вы участвуете в розыгрыше!")
+    else:
+        await callback.answer("Вы уже участвуете в этом розыгрыше.")
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=keyboards.giveaway_keyboard(giveaway_id, count))
+    except Exception:
+        pass  # если счётчик не изменился (повторный клик), Telegram вернёт "message not modified" — не страшно
+
+
+@router.message(Command("endgiveaway"))
+async def cmd_endgiveaway(message: Message, bot: Bot, command: CommandObject):
+    """Досрочно завершить розыгрыш и выбрать победителя прямо сейчас."""
+    if not await _require_permission(message, bot, "manage_settings"):
+        return
+    if not command.args:
+        await message.reply("Использование: /endgiveaway <id> (id виден в /giveaways)")
+        return
+    try:
+        giveaway_id = int(command.args.split()[0])
+    except ValueError:
+        await message.reply("Использование: /endgiveaway <id>")
+        return
+
+    giveaway = await db.get_giveaway(giveaway_id)
+    if giveaway is None or giveaway["status"] != "active":
+        await message.reply("Такого активного розыгрыша нет.")
+        return
+
+    await _finish_giveaway(bot, giveaway_id)
+    await message.reply("✅ Розыгрыш завершён досрочно.")
+
+
+@router.message(Command("giveaways"))
+async def cmd_giveaways(message: Message, bot: Bot):
+    if not await _require_permission(message, bot, "manage_settings"):
+        return
+    active = await db.list_active_giveaways()
+    if not active:
+        await message.reply("Активных розыгрышей нет.")
+        return
+    lines = ["🎉 <b>Активные розыгрыши</b>", ""]
+    now = int(time.time())
+    for g in active:
+        count = await db.count_giveaway_participants(g["id"])
+        remaining_min = max(0, (g["ends_at"] - now) // 60)
+        lines.append(f"#{g['id']} — {g['prize']} — участников: {count}, осталось ~{remaining_min} мин.")
+    await message.reply("\n".join(lines))
 
 
 @router.message(Command("kick"))
@@ -1897,10 +2042,18 @@ async def _reconcile_after_restart(bot: Bot):
         else:
             asyncio.create_task(punishments._auto_unmute(bot, config.ALLOWED_CHAT_ID, member["user_id"], remaining))
 
-    if pending_list or muted_list:
+    giveaways_list = await db.list_active_giveaways()
+    for g in giveaways_list:
+        remaining = g["ends_at"] - now
+        if remaining <= 0:
+            await _finish_giveaway(bot, g["id"])
+        else:
+            asyncio.create_task(_giveaway_auto_finish(bot, g["id"], remaining))
+
+    if pending_list or muted_list or giveaways_list:
         logger.info(
-            "Восстановлено после рестарта: %d капч(и) в ожидании, %d активных мутов.",
-            len(pending_list), len(muted_list),
+            "Восстановлено после рестарта: %d капч(и) в ожидании, %d активных мутов, %d розыгрыш(ей).",
+            len(pending_list), len(muted_list), len(giveaways_list),
         )
 
 
